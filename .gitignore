@@ -1,0 +1,7 @@
+.env
+*.backup-*
+mindlogic-models.json
+mindlogic-profile.json
+__pycache__/
+*.pyc
+.DS_Store
