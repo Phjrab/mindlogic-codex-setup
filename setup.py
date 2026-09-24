@@ -38,7 +38,7 @@ def fail(message: str) -> None:
 
 
 def codex_executable() -> str:
-    candidates = [shutil.which("codex"), "/Applications/ChatGPT.app/Contents/Resources/codex"]
+    candidates = ["/Applications/ChatGPT.app/Contents/Resources/codex", shutil.which("codex")]
     for candidate in candidates:
         if candidate and Path(candidate).is_file():
             return candidate
@@ -222,7 +222,7 @@ def install() -> None:
     catalog = build_catalog(available)
     current = CONFIG.read_text() if CONFIG.exists() else ""
     previous = {
-        "openai_model": top_level_value(current, "model") if top_level_value(current, "model_provider") in (None, "openai") else "gpt-6-astra",
+        "openai_model": (top_level_value(current, "model") or "gpt-6-astra") if top_level_value(current, "model_provider") in (None, "openai") else "gpt-6-astra",
         "openai_effort": top_level_value(current, "model_reasoning_effort") or "medium",
     }
     if PROFILE.exists():
