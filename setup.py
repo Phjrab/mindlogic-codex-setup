@@ -422,7 +422,7 @@ def switch_existing_thread(thread_id: str, *, preserve_archive: bool = False) ->
 
 def main() -> None:
     action = sys.argv[1] if len(sys.argv) >= 2 else None
-    if action in ("menu-install", "menu-refresh", "menu-status", "menu-remove"):
+    if action in ("menu-install", "menu-refresh", "menu-auth-isolate", "menu-status", "menu-remove"):
         if len(sys.argv) != 2:
             fail(f"Usage: python3 setup.py {action}")
         import menu_install

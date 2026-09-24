@@ -6,7 +6,7 @@ macOS ChatGPT/Codex 앱의 **기존 모델 선택 메뉴**에 OpenAI 모델과 `
 
 2026-09-24의 macOS ChatGPT/Codex 앱 **26.917.51856**(빌드 10492), 내장 CLI **0.155.0-alpha.16**을 기준으로 합니다. 이 버전에서는 모델 선택이 모델을 변경하지만 이미 로드된 대화의 실행 제공자를 바꾸지는 않았습니다. `thread/resume(modelProvider=...)`도 로드된 대화에는 적용되지 않았습니다. 따라서 `model_provider`를 사용자 수준에서 한 번 `mindlogic_menu_router`로 고정하고, 모델 ID별로 로컬 Responses 라우터가 분기합니다.
 
-이 경로는 Codex의 사용자 지정 제공자 설정 `requires_openai_auth = true`, `http_headers`, `model_catalog_json`과 app-server `model/list`를 사용합니다. [인증 설명](https://learn.chatgpt.com/docs/auth#alternative-model-providers)에는 사용자 지정 제공자가 기존 ChatGPT 로그인을 사용할 수 있다고 명시되어 있습니다. 그러나 이 설정으로 OpenAI 한도 검사와 무관하게 Mindlogic을 사용할 수 있다는 뜻은 아닙니다. `requires_openai_auth = false`로 단순 변경하면 라우터가 기존 ChatGPT bearer 인증을 받지 못해 OpenAI 메뉴 경로를 유지할 수 없습니다. [설정 레퍼런스](https://learn.chatgpt.com/docs/config-file/config-reference)와 [App Server 문서](https://learn.chatgpt.com/docs/app-server)를 함께 참고하세요. 라우터는 Codex 바이너리나 앱 서명을 수정하지 않습니다.
+로컬 인증 분리 후보는 Codex 사용자 지정 제공자의 `requires_openai_auth = false`, 별도 `http_headers` 로컬 토큰, `model_catalog_json`을 사용합니다. [설정 레퍼런스](https://learn.chatgpt.com/docs/config-file/config-reference)는 이 값이 제공자의 OpenAI 인증 필요 여부라고 설명합니다. 이 설정에서는 앱이 기존 ChatGPT bearer를 라우터에 전달한다고 가정할 수 없으므로, 현재 OpenAI 메뉴 경로는 정상 구독 인증을 별도로 확보하지 못한 경우 명확한 오류로 중단합니다. Mindlogic 경로는 로컬 토큰과 `FACTCHAT_API_KEY`만 사용합니다. 이 후보가 기본 앱의 입력 차단을 해소하는지는 별도로 확인해야 합니다. 라우터는 Codex 바이너리나 앱 서명을 수정하지 않습니다.
 
 OpenAI upstream의 `chatgpt.com/backend-api/codex` 경로는 현재 설치된 클라이언트 요청에서 관찰·검증한 값이며 공개 안정성 계약으로 문서화된 경로는 아닙니다. 앱 버전이 바뀐 뒤에는 실제 왕복 요청을 다시 확인해야 합니다.
 
@@ -42,12 +42,14 @@ python3 setup.py menu-thread <기존-threadId>
 
 OpenAI 인증 헤더는 Mindlogic에 전달하지 않습니다. 라우터는 SSE 데이터를 순서대로 전달하고 클라이언트가 취소하면 upstream 연결을 닫습니다. `store=false`를 유지하고 `previous_response_id`·`conversation` 같은 서버 종속 참조가 있으면 명시적으로 거절합니다. 제공자를 바꾸거나 라우터가 재시작된 첫 요청에서는 다른 제공자의 암호화된 reasoning 항목을 제외합니다. 보이는 대화 이력과 도구 호출·결과 항목은 유지합니다. 연결 실패 시 다른 제공자로 자동 우회하지 않습니다. 로그에는 별칭, 실제 모델, 목적지, 인증 **종류**, 요청 ID, HTTP 상태만 남기며 토큰과 본문을 기록하지 않습니다.
 
+이미 설치된 로컬 라우터에 작은 인증 분리 후보만 적용하려면 `python3 setup.py menu-auth-isolate`를 실행합니다. 기존 설정과 라우터 파일을 백업하고, 제공자 섹션의 인증 필요 여부와 라우터 코드를 갱신합니다. 현재 선택된 기본 제공자·모델과 각 대화의 실행 제공자는 바꾸지 않습니다. OpenAI 구독 인증을 독립적으로 공급할 지원 인터페이스가 확인되기 전까지, 이 후보의 OpenAI 메뉴 경로는 실제 사용 가능하다고 간주하지 마세요.
+
 ## 확인 결과 (2026-09-24)
 
 | 항목 | 결과 | 근거 |
 | --- | --- | --- |
 | 내장 `model/list` | PASS | OpenAI 7개와 Mindlogic 7개가 함께 반환됨 |
-| 설치된 CLI의 제공자 왕복 | PASS | `OpenAI → Mindlogic → OpenAI` 각 요청 HTTP 200, 라우터 목적지·인증 종류 기록 |
+| 이전 인증 결합 구성의 CLI 제공자 왕복 | PASS (이전 구성) | 당시 `OpenAI → Mindlogic → OpenAI` HTTP 200. 현재 인증 분리 후보의 OpenAI 구독 경로 검증으로 대체할 수 없음 |
 | Mindlogic 모델 간 ID | PASS (CLI) | `gpt-6-sol`과 `gpt-6-luna`의 별칭·upstream 모델 ID 확인 |
 | Mindlogic 스트리밍 | PASS (CLI) | Responses SSE로 정상 응답 |
 | Mindlogic 도구 왕복 | PASS (CLI) | Gateway HTTP 200 두 번, `command_execution` 시작·완료와 `turn.completed` 확인 |
@@ -56,6 +58,8 @@ OpenAI 인증 헤더는 Mindlogic에 전달하지 않습니다. 라우터는 SSE
 | 같은 대화의 제공자 전환 | PASS (임시 app-server) | 같은 threadId의 두 turn에서 Mindlogic → OpenAI 목적지·인증 종류 변경, 모두 HTTP 200 |
 | 지정된 기존 대화의 Mindlogic 직접 복구 | PASS | 동일 threadId·이력·프로젝트 경로에서 `factchat / gpt-6-luna`를 저장하고, 원래 앱 경로의 후속 요청에서 `factchat-cloud.mindlogic.ai/v1/gateway/responses` HTTP 200 확인 |
 | 무인증 로컬 요청 | PASS | HTTP 401 |
+| OpenAI Bearer 없는 Mindlogic 라우터 요청 | PASS (모의 upstream) | 별도 로컬 토큰과 Mindlogic 키만으로 SSE 완료; OpenAI 경로는 인증 없으면 upstream 호출 없이 503 |
+| 인증 분리 후보의 기본 앱 입력 | NOT TESTED | 실제 앱의 메뉴 선택·전송 판정·라우터 도달은 별도 확인 필요 |
 | 복구 | PASS (모의) | 설치·반복 설치 거부·메뉴 선택 후 설정 복원 시험 통과 |
 
 `python3 -m unittest -v test_menu.py`는 TOML의 주석·따옴표 키·작은따옴표 문자열·여러 줄 문자열, 백업 이름, 설치·복구, 모의 제공자 분기·키 분리·SSE·도구 항목·오류를 검사합니다. CLI 결과는 기본 앱 메뉴 조작 성공을 대신하지 않습니다. 현재 주목표인 **기본 앱에서 재시작·터미널 명령 없이 OpenAI → Mindlogic → OpenAI 전환**은 달성되지 않았습니다. 사용자가 현재 `factchat` 직접 연결로 돌린 설정은 그대로 두었습니다. 지정 대화는 한도 차단을 피하기 위해 라우터 제공자에서 Mindlogic 직접 제공자로 재연결했습니다. 한도 차단의 정확한 위치와 지원되는 해결 인터페이스가 확인되기 전까지 라우터를 다시 활성화하거나 테스트용 OpenAI 요청을 보내지 마세요.

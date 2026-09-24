@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Loopback-only Responses router for the Codex model picker.
 
-The fixed Codex provider supplies the existing ChatGPT bearer credential. It is
-forwarded only to the ChatGPT Codex endpoint. Mindlogic receives only its own
-key, read from the user's existing .env file at request time.
+The local router token authenticates Codex to this loopback service. Each
+upstream route then uses its own credential. Mindlogic reads its key from the
+user's existing .env file at request time.
 """
 
 from __future__ import annotations
@@ -113,10 +113,11 @@ class Handler(BaseHTTPRequestHandler):
             if payload.get("previous_response_id") or payload.get("conversation"):
                 self.reply(HTTPStatus.CONFLICT, "server_reference", "Server response references cannot cross provider routes")
                 return
-            if not self.headers.get("Authorization", "").startswith("Bearer "):
-                self.reply(HTTPStatus.UNAUTHORIZED, "chatgpt_auth_missing", "Codex did not provide ChatGPT authentication")
-                return
             route, upstream_model = mapping["provider"], mapping["model"]
+            if route == "openai" and not self.headers.get("Authorization", "").startswith("Bearer "):
+                self.reply(HTTPStatus.SERVICE_UNAVAILABLE, "openai_auth_unavailable",
+                           "OpenAI subscription authentication is unavailable for this local provider")
+                return
             payload["model"] = upstream_model
             thread_id = self.headers.get("thread-id")
             with self.server.thread_lock:

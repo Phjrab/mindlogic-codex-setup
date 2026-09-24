@@ -63,7 +63,25 @@ enabled = true
                      "mindlogic/gpt-6-sol": {"provider": "mindlogic", "model": "gpt-6-sol"}}}
             with patch.multiple(menu_install, **paths), patch.object(menu_install, "catalog_and_routes", return_value=(catalog, routes)), patch.object(menu_install, "launch"), patch.object(menu_install, "await_router_health"):
                 menu_install.install()
-                self.assertEqual(tomllib.loads(config.read_text())["model"], "mindlogic/gpt-6-sol")
+                installed = tomllib.loads(config.read_text())
+                self.assertEqual(installed["model"], "mindlogic/gpt-6-sol")
+                self.assertFalse(installed["model_providers"]["mindlogic_menu_router"]["requires_openai_auth"])
+                self.assertIn("X-Mindlogic-Router-Token",
+                              installed["model_providers"]["mindlogic_menu_router"]["http_headers"])
+                state = json.loads(paths["STATE"].read_text())
+                state["provider_section"] = state["provider_section"].replace(
+                    "requires_openai_auth = false\n", "requires_openai_auth = true\n")
+                paths["STATE"].write_text(json.dumps(state))
+                config.write_text(config.read_text().replace("requires_openai_auth = false\n",
+                                                             "requires_openai_auth = true\n").replace(
+                    'model_provider = "mindlogic_menu_router"', 'model_provider = "factchat"', 1))
+                menu_install.isolate_local_auth()
+                isolated = tomllib.loads(config.read_text())
+                self.assertEqual(isolated["model_provider"], "factchat")
+                self.assertFalse(isolated["model_providers"]["mindlogic_menu_router"]["requires_openai_auth"])
+                menu_install.isolate_local_auth()
+                config.write_text(config.read_text().replace('model_provider = "factchat"',
+                                                             'model_provider = "mindlogic_menu_router"', 1))
                 with self.assertRaises(ValueError):
                     menu_install.install()
                 config.write_text(config.read_text().replace('model = "mindlogic/gpt-6-sol"', 'model = "gpt-6-sol"'))
@@ -136,17 +154,18 @@ class RouterTests(unittest.TestCase):
         self.thread.join(timeout=2)
         self.temp.cleanup()
 
-    def request(self, model, extra=None):
+    def request(self, model, extra=None, *, openai_auth=False, local_token="local-test"):
         body = {"model": model, "stream": True, "input": [
             {"type": "reasoning", "encrypted_content": "opaque"},
             {"type": "function_call", "call_id": "call_1", "name": "echo", "arguments": "{}"},
             {"type": "function_call_output", "call_id": "call_1", "output": "ok"}]}
         body.update(extra or {})
         conn = http.client.HTTPConnection("127.0.0.1", self.server.server_port)
-        conn.request("POST", "/responses", json.dumps(body), {"Authorization": "Bearer secret-openai",
-                     menu_router.LOCAL_TOKEN_HEADER: "local-test",
-                     "thread-id": "thread-test",
-                     "chatgpt-account-id": "account", "Content-Type": "application/json"})
+        headers = {menu_router.LOCAL_TOKEN_HEADER: local_token, "thread-id": "thread-test",
+                   "chatgpt-account-id": "account", "Content-Type": "application/json"}
+        if openai_auth:
+            headers["Authorization"] = "Bearer secret-openai"
+        conn.request("POST", "/responses", json.dumps(body), headers)
         result = conn.getresponse()
         status, data = result.status, result.read()
         conn.close()
@@ -154,7 +173,7 @@ class RouterTests(unittest.TestCase):
 
     def test_routes_and_separates_credentials_and_tools(self):
         for model in ("gpt-6-sol", "mindlogic/gpt-6-sol", "gpt-6-sol"):
-            status, data = self.request(model)
+            status, data = self.request(model, openai_auth=model == "gpt-6-sol")
             self.assertEqual(status, 200)
             self.assertIn(b"response.completed", data)
         self.assertEqual([call[0] for call in FakeConnection.calls],
@@ -174,8 +193,8 @@ class RouterTests(unittest.TestCase):
         self.assertEqual(FakeConnection.calls, [])
 
     def test_reasoning_is_kept_only_on_stable_route(self):
-        self.request("gpt-6-sol")
-        self.request("gpt-6-sol")
+        self.request("gpt-6-sol", openai_auth=True)
+        self.request("gpt-6-sol", openai_auth=True)
         self.request("mindlogic/gpt-6-sol")
         self.assertEqual(len(FakeConnection.calls[0][2]["input"]), 2)
         self.assertEqual(len(FakeConnection.calls[1][2]["input"]), 3)
@@ -190,6 +209,29 @@ class RouterTests(unittest.TestCase):
         result.read()
         conn.close()
         self.assertEqual(FakeConnection.calls, [])
+
+    def test_mindlogic_needs_no_openai_auth_and_openai_fails_closed(self):
+        status, data = self.request("mindlogic/gpt-6-sol")
+        self.assertEqual(status, 200)
+        self.assertIn(b"response.completed", data)
+        self.assertEqual(FakeConnection.calls[0][0], menu_router.MINDLOGIC_HOST)
+        self.assertEqual(FakeConnection.calls[0][3]["Authorization"], "Bearer secret-mindlogic")
+        self.assertEqual(self.request("gpt-6-sol")[0], 503)
+        self.assertEqual(len(FakeConnection.calls), 1)
+
+    def test_wrong_local_token_blocks_both_routes(self):
+        for model in ("gpt-6-sol", "mindlogic/gpt-6-sol"):
+            self.assertEqual(self.request(model, openai_auth=True, local_token="wrong")[0], 401)
+        self.assertEqual(FakeConnection.calls, [])
+
+    def test_mindlogic_upstream_errors_never_fall_back_to_openai(self):
+        for upstream_status in (401, 429):
+            with patch.object(FakeResponse, "status", upstream_status):
+                self.assertEqual(self.request("mindlogic/gpt-6-sol")[0], upstream_status)
+        with patch.object(FakeConnection, "getresponse", side_effect=OSError("offline")):
+            self.assertEqual(self.request("mindlogic/gpt-6-sol")[0], 502)
+        self.assertEqual([call[0] for call in FakeConnection.calls],
+                         [menu_router.MINDLOGIC_HOST] * 3)
 
 
 if __name__ == "__main__":
