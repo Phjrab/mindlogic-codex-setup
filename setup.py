@@ -121,9 +121,12 @@ def build_catalog(available: set[str]) -> dict:
             additional_speed_tiers=[],
             service_tiers=[],
         )
+        allowed_efforts = {"low", "medium", "high", "xhigh"}
+        if slug != "gpt-5.5":
+            allowed_efforts.add("max")
         model["supported_reasoning_levels"] = [
             level for level in model.get("supported_reasoning_levels", [])
-            if level.get("effort") in {"low", "medium", "high"}
+            if level.get("effort") in allowed_efforts
         ]
         models.append(model)
     if not models:

@@ -39,6 +39,12 @@ python3 setup.py install
 
 스크립트가 인식하는 모델 ID는 `gpt-6-sol`, `gpt-6-luna`, `gpt-6-astra`, `gpt-5.6-sol`, `gpt-5.6-terra`, `gpt-5.6-luna`, `gpt-5.5`입니다. 이 중 본인 키의 목록에 있는 모델만 추가됩니다. 모델 목록에 있더라도 모든 Codex 도구 호출과의 호환성이 보장되지는 않습니다. 작성자의 계정에서는 `gpt-6-sol`의 Codex 도구 호출과 `gpt-6-luna`, `gpt-5.6-sol`의 간단한 Responses 요청을 확인했습니다. 다른 계정이나 버전은 직접 확인해야 합니다.
 
+## 추론 강도
+
+2026-09-24에 Mindlogic Gateway의 짧은 Responses 요청으로 확인한 결과, 위 GPT-6·GPT-5.6 모델은 `xhigh`와 `max`를 받아들였고 GPT-5.5는 `xhigh`를 받아들였습니다. GPT-5.5의 `max`와 GPT-6 Sol의 `ultra`는 HTTP 400으로 거절됐습니다. 따라서 설치 스크립트는 GPT-6·GPT-5.6에 `low`, `medium`, `high`, `xhigh`, `max`를, GPT-5.5에 `low`, `medium`, `high`, `xhigh`를 표시합니다. 기본값은 `medium`입니다.
+
+[OpenAI 추론 문서](https://developers.openai.com/api/docs/guides/reasoning)는 모델별로 높은 단계를 안내하지만, [Mindlogic Responses 문서](https://docs.mindlogic.ai/docs/ynu-ac/api-gateway/reference/responses-api)는 `high`까지만 예시로 적고 있습니다. 위 범위는 작성자 계정의 실제 API 응답에 근거합니다. 다른 계정이나 Gateway 변경 후의 동작은 달라질 수 있습니다.
+
 **Claude 모델은 이 Codex 제공자에 추가하지 않습니다.** [OpenAI Codex 설정 문서](https://learn.chatgpt.com/docs/config-file/config-reference)의 사용자 지정 모델 제공자는 Responses 프로토콜을 사용하며, [Mindlogic 모델 문서](https://docs.mindlogic.ai/docs/general/api-gateway/getting-started/models)는 Claude에 Chat Completions 또는 Anthropic Messages 경로를 안내합니다. Claude를 쓰려면 해당 프로토콜을 지원하는 별도 클라이언트가 필요합니다.
 
 ## 원상 복구
