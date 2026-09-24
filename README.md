@@ -8,6 +8,8 @@ macOS ChatGPT/Codex 앱의 **기존 모델 선택 메뉴**에 OpenAI 모델과 `
 
 이 경로는 Codex의 공식 사용자 지정 제공자 설정 `requires_openai_auth = true`, `http_headers`, `model_catalog_json`과 app-server `model/list`를 사용합니다. [인증 설명](https://learn.chatgpt.com/docs/auth#alternative-model-providers)에는 사용자 지정 제공자가 기존 ChatGPT 로그인을 사용할 수 있다고 명시되어 있습니다. [설정 레퍼런스](https://learn.chatgpt.com/docs/config-file/config-reference)와 [App Server 문서](https://learn.chatgpt.com/docs/app-server)를 함께 참고하세요. 라우터는 Codex 바이너리나 앱 서명을 수정하지 않습니다.
 
+OpenAI upstream의 `chatgpt.com/backend-api/codex` 경로는 현재 설치된 클라이언트 요청에서 관찰·검증한 값이며 공개 안정성 계약으로 문서화된 경로는 아닙니다. 앱 버전이 바뀐 뒤에는 실제 왕복 요청을 다시 확인해야 합니다.
+
 ## 설치와 일상 사용
 
 기존 `FACTCHAT_API_KEY`는 `~/.codex/.env`에서 사용합니다. 키 값은 로그·설정·저장소에 기록하지 않습니다. 설치 명령은 모델 목록 조회, 기존 설정 백업, 사용자 수준 LaunchAgent 등록을 한 번 수행합니다.

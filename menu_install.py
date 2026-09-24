@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import copy
 import hashlib
+from http.client import HTTPConnection
 import json
 import os
 from pathlib import Path
@@ -14,6 +15,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import tomllib
 import uuid
 
@@ -195,6 +197,22 @@ def launch(action: str) -> None:
         raise RuntimeError(f"launchctl {action} failed: {result.stderr.strip()[:300]}")
 
 
+def await_router_health(seconds: float = 6) -> None:
+    deadline = time.monotonic() + seconds
+    while time.monotonic() < deadline:
+        connection = HTTPConnection("127.0.0.1", PORT, timeout=0.5)
+        try:
+            connection.request("GET", "/health")
+            if connection.getresponse().status == 200:
+                return
+        except OSError:
+            pass
+        finally:
+            connection.close()
+        time.sleep(0.2)
+    raise RuntimeError("Router service did not become healthy after launch")
+
+
 def install() -> None:
     if STATE.exists():
         raise ValueError("Menu router is already installed; use menu-refresh or menu-remove")
@@ -236,6 +254,7 @@ def install() -> None:
             atomic_bytes(path, data, mode)
             made.append(path)
         launch("bootstrap")
+        await_router_health()
     except BaseException:
         if AGENT in made:
             try:
@@ -272,6 +291,7 @@ def refresh() -> None:
         atomic_bytes(MANIFEST, json.dumps(manifest, ensure_ascii=False, indent=2).encode() + b"\n")
         atomic_bytes(ROUTER, Path(__file__).with_name("menu_router.py").read_bytes(), 0o700)
         launch("kickstart")
+        await_router_health()
     except BaseException:
         for path, data in originals.items():
             atomic_bytes(path, data, 0o700 if path == ROUTER else 0o600)

@@ -61,7 +61,7 @@ enabled = true
             catalog = {"models": [{"slug": "gpt-6-sol"}, {"slug": "mindlogic/gpt-6-sol"}]}
             routes = {"routes": {"gpt-6-sol": {"provider": "openai", "model": "gpt-6-sol"},
                      "mindlogic/gpt-6-sol": {"provider": "mindlogic", "model": "gpt-6-sol"}}}
-            with patch.multiple(menu_install, **paths), patch.object(menu_install, "catalog_and_routes", return_value=(catalog, routes)), patch.object(menu_install, "launch"):
+            with patch.multiple(menu_install, **paths), patch.object(menu_install, "catalog_and_routes", return_value=(catalog, routes)), patch.object(menu_install, "launch"), patch.object(menu_install, "await_router_health"):
                 menu_install.install()
                 self.assertEqual(tomllib.loads(config.read_text())["model"], "mindlogic/gpt-6-sol")
                 with self.assertRaises(ValueError):
