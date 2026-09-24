@@ -366,6 +366,8 @@ def switch_existing_thread(thread_id: str) -> None:
         if thread["status"]["type"] != "notLoaded":
             fail("대화가 아직 로드되어 있습니다. 앱에서 해당 대화를 보관한 뒤 다시 보관 해제하고, 다른 대화에서 이 명령을 실행하세요.")
         model = thread.get("model") or top_level_value(CONFIG.read_text(), "model")
+        if thread.get("modelProvider") == "mindlogic_menu_router" and isinstance(model, str) and model.startswith("mindlogic/"):
+            model = model.removeprefix("mindlogic/")
         if model not in supported:
             fail(f"대화 모델 {model!r}은 현재 Mindlogic 모델 목록에 없습니다. 모델을 바꾼 뒤 다시 시도하세요.")
         cwd = thread["cwd"]

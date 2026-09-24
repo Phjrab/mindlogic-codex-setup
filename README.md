@@ -54,11 +54,13 @@ OpenAI 인증 헤더는 Mindlogic에 전달하지 않습니다. 라우터는 SSE
 | 기본 앱 메뉴 표시 | PASS (사용자 관찰) | 앱 재시작 후 OpenAI와 Mindlogic 항목이 함께 표시됨 |
 | 기본 앱 메뉴 클릭·왕복 | BLOCKED | OpenAI 한도 초과 상태에서 Mindlogic 항목 선택 후 앱이 입력을 막음. 해당 시도에 대응하는 라우터 요청 기록 없음 |
 | 같은 대화의 제공자 전환 | PASS (임시 app-server) | 같은 threadId의 두 turn에서 Mindlogic → OpenAI 목적지·인증 종류 변경, 모두 HTTP 200 |
-| 지정된 기존 대화 재연결 | PASS (모델 요청 전) | 동일 threadId·이력·프로젝트 경로로 라우터 제공자를 저장; 앱 메뉴 클릭 검증은 별도 |
+| 지정된 기존 대화의 Mindlogic 직접 복구 | PASS | 동일 threadId·이력·프로젝트 경로에서 `factchat / gpt-6-luna`를 저장하고, 원래 앱 경로의 후속 요청에서 `factchat-cloud.mindlogic.ai/v1/gateway/responses` HTTP 200 확인 |
 | 무인증 로컬 요청 | PASS | HTTP 401 |
 | 복구 | PASS (모의) | 설치·반복 설치 거부·메뉴 선택 후 설정 복원 시험 통과 |
 
-`python3 -m unittest -v test_menu.py`는 TOML의 주석·따옴표 키·작은따옴표 문자열·여러 줄 문자열, 백업 이름, 설치·복구, 모의 제공자 분기·키 분리·SSE·도구 항목·오류를 검사합니다. CLI 결과는 기본 앱 메뉴 조작 성공을 대신하지 않습니다. 현재 주목표인 **기본 앱에서 재시작·터미널 명령 없이 OpenAI → Mindlogic → OpenAI 전환**은 달성되지 않았습니다. 사용자가 현재 `factchat` 직접 연결로 돌린 설정은 그대로 두었습니다. 한도 차단의 정확한 위치와 지원되는 해결 인터페이스가 확인되기 전까지 라우터를 다시 활성화하거나 테스트용 OpenAI 요청을 보내지 마세요.
+`python3 -m unittest -v test_menu.py`는 TOML의 주석·따옴표 키·작은따옴표 문자열·여러 줄 문자열, 백업 이름, 설치·복구, 모의 제공자 분기·키 분리·SSE·도구 항목·오류를 검사합니다. CLI 결과는 기본 앱 메뉴 조작 성공을 대신하지 않습니다. 현재 주목표인 **기본 앱에서 재시작·터미널 명령 없이 OpenAI → Mindlogic → OpenAI 전환**은 달성되지 않았습니다. 사용자가 현재 `factchat` 직접 연결로 돌린 설정은 그대로 두었습니다. 지정 대화는 한도 차단을 피하기 위해 라우터 제공자에서 Mindlogic 직접 제공자로 재연결했습니다. 한도 차단의 정확한 위치와 지원되는 해결 인터페이스가 확인되기 전까지 라우터를 다시 활성화하거나 테스트용 OpenAI 요청을 보내지 마세요.
+
+같은 복구가 필요한 다른 유휴 대화는 해당 대화만 앱에서 보관·보관 해제하여 writer를 해제한 뒤 `python3 setup.py mindlogic-thread <threadId>`로 직접 Mindlogic 제공자에 재연결할 수 있습니다. 이 명령은 `mindlogic/...` 메뉴 별칭도 원래 모델 ID로 변환하며 요청은 보내지 않습니다. 재연결 후 원래 앱에서 이어서 작업할 때 실제 요청 목적지를 확인하세요.
 
 ## 제거와 복구
 
