@@ -59,6 +59,7 @@ OpenAI 인증 헤더는 Mindlogic에 전달하지 않습니다. 라우터는 SSE
 | 지정된 기존 대화의 Mindlogic 직접 복구 | PASS | 동일 threadId·이력·프로젝트 경로에서 `factchat / gpt-6-luna`를 저장하고, 원래 앱 경로의 후속 요청에서 `factchat-cloud.mindlogic.ai/v1/gateway/responses` HTTP 200 확인 |
 | 무인증 로컬 요청 | PASS | HTTP 401 |
 | OpenAI Bearer 없는 Mindlogic 라우터 요청 | PASS (모의 upstream) | 별도 로컬 토큰과 Mindlogic 키만으로 SSE 완료; OpenAI 경로는 인증 없으면 upstream 호출 없이 503 |
+| 기존 대화의 앱 지원 도구 후속 요청 | PASS (메뉴 조작 아님) | 인증 분리 후보에서 Gateway HTTP 200과 응답을 확인하고, 같은 ID·이력·경로로 `factchat / gpt-6-luna` 직접 연결을 복구함 |
 | 인증 분리 후보의 기본 앱 입력 | NOT TESTED | 실제 앱의 메뉴 선택·전송 판정·라우터 도달은 별도 확인 필요 |
 | 복구 | PASS (모의) | 설치·반복 설치 거부·메뉴 선택 후 설정 복원 시험 통과 |
 
