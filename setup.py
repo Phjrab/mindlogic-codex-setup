@@ -11,6 +11,7 @@ from pathlib import Path
 import re
 import select
 import shutil
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -344,7 +345,7 @@ class AppServer:
         fail(f"Codex {method} 응답을 30초 안에 받지 못했습니다.")
 
 
-def switch_existing_thread(thread_id: str) -> None:
+def switch_existing_thread(thread_id: str, *, preserve_archive: bool = False) -> None:
     """Persist Mindlogic on an already-unloaded thread, without a model turn."""
     try:
         if str(uuid.UUID(thread_id)) != thread_id:
@@ -358,6 +359,15 @@ def switch_existing_thread(thread_id: str) -> None:
     if not CATALOG.exists():
         fail("Mindlogic 모델 목록이 없습니다. 먼저 설치를 완료하세요.")
     supported = {item["slug"] for item in json.loads(CATALOG.read_text())["models"]}
+
+    archived = False
+    if preserve_archive:
+        database = CODEX_HOME / "state_5.sqlite"
+        with sqlite3.connect(f"file:{database}?mode=ro", uri=True) as connection:
+            row = connection.execute("SELECT archived FROM threads WHERE id = ?", (thread_id,)).fetchone()
+        if row is None:
+            fail("대화를 찾지 못했습니다.")
+        archived = bool(row[0])
 
     with AppServer() as server:
         thread = server.call("thread/read", {"threadId": thread_id})["thread"]
@@ -373,20 +383,26 @@ def switch_existing_thread(thread_id: str) -> None:
         cwd = thread["cwd"]
         project_id = thread.get("projectId")
         source = thread.get("source")
-        resumed = server.call("thread/resume", {
-            "threadId": thread_id,
-            "modelProvider": "factchat",
-            "model": model,
-        })
-        if (resumed["thread"]["id"] != thread_id or
-                resumed["thread"]["modelProvider"] != "factchat" or
-                resumed["thread"].get("projectId") != project_id or
-                resumed["thread"].get("source") != source or
-                resumed["modelProvider"] != "factchat" or
-                resumed["model"] != model or Path(resumed["cwd"]).resolve() != Path(cwd).resolve()):
-            actual = {"threadId": resumed["thread"]["id"], "modelProvider": resumed["modelProvider"],
-                      "model": resumed["model"], "cwd": resumed["cwd"]}
-            fail(f"재개 결과가 예상과 다릅니다: {actual}. 요청을 보내지 마세요.")
+        if archived:
+            server.call("thread/unarchive", {"threadId": thread_id})
+        try:
+            resumed = server.call("thread/resume", {
+                "threadId": thread_id,
+                "modelProvider": "factchat",
+                "model": model,
+            })
+            if (resumed["thread"]["id"] != thread_id or
+                    resumed["thread"]["modelProvider"] != "factchat" or
+                    resumed["thread"].get("projectId") != project_id or
+                    resumed["thread"].get("source") != source or
+                    resumed["modelProvider"] != "factchat" or
+                    resumed["model"] != model or Path(resumed["cwd"]).resolve() != Path(cwd).resolve()):
+                actual = {"threadId": resumed["thread"]["id"], "modelProvider": resumed["modelProvider"],
+                          "model": resumed["model"], "cwd": resumed["cwd"]}
+                fail(f"재개 결과가 예상과 다릅니다: {actual}. 요청을 보내지 마세요.")
+        finally:
+            if archived:
+                server.call("thread/archive", {"threadId": thread_id})
 
     # A second process checks persisted state after the first writer exits.
     with AppServer() as server:
@@ -395,6 +411,11 @@ def switch_existing_thread(thread_id: str) -> None:
                 thread.get("model") != model or Path(thread["cwd"]).resolve() != Path(cwd).resolve() or
                 thread.get("projectId") != project_id or thread.get("source") != source):
             fail("Mindlogic 실행 제공자가 저장되지 않았습니다. 요청을 보내지 마세요.")
+    if archived:
+        with sqlite3.connect(f"file:{database}?mode=ro", uri=True) as connection:
+            row = connection.execute("SELECT archived FROM threads WHERE id = ?", (thread_id,)).fetchone()
+        if row is None or not row[0]:
+            fail("원래 보관 상태가 복구되지 않았습니다.")
     print(f"동일 대화 {thread_id}의 저장된 실행 제공자: Mindlogic ({model})")
     print("원래 Codex 앱에서 이 대화를 다시 열고, 후속 요청의 실제 목적지를 확인하세요.")
 
@@ -421,8 +442,10 @@ def main() -> None:
         if len(sys.argv) != 2:
             fail("Usage: python3 setup.py status")
         status()
-    elif action == "mindlogic-thread" and len(sys.argv) == 3:
-        switch_existing_thread(sys.argv[2])
+    elif action == "mindlogic-thread" and len(sys.argv) in (3, 4):
+        if len(sys.argv) == 4 and sys.argv[3] != "--preserve-archive":
+            fail("Usage: python3 setup.py mindlogic-thread THREAD_ID [--preserve-archive]")
+        switch_existing_thread(sys.argv[2], preserve_archive=len(sys.argv) == 4)
     else:
         fail("Usage: python3 setup.py {install|openai|mindlogic|status|mindlogic-thread THREAD_ID}")
 

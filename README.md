@@ -62,6 +62,18 @@ OpenAI 인증 헤더는 Mindlogic에 전달하지 않습니다. 라우터는 SSE
 
 같은 복구가 필요한 다른 유휴 대화는 해당 대화만 앱에서 보관·보관 해제하여 writer를 해제한 뒤 `python3 setup.py mindlogic-thread <threadId>`로 직접 Mindlogic 제공자에 재연결할 수 있습니다. 이 명령은 `mindlogic/...` 메뉴 별칭도 원래 모델 ID로 변환하며 요청은 보내지 않습니다. 재연결 후 원래 앱에서 이어서 작업할 때 실제 요청 목적지를 확인하세요.
 
+### Mindlogic 직접 연결 시 기존 대화 자동 재연결
+
+`python3 thread_sync.py install`을 한 번 실행하면 사용자 권한의 LaunchAgent가 60초마다 **일반 사용자 대화와 보관된 일반 사용자 대화**의 저장된 제공자를 확인합니다. 기본 제공자가 `factchat`일 때만, Mindlogic 카탈로그에 같은 모델이 있고 다른 실행 주체의 writer가 없는 대화를 동일 ID·경로로 재연결합니다. 보관된 대화는 지원 프로토콜로 임시 보관 해제하고 재연결한 뒤 다시 보관하여 원래 상태를 확인합니다. 모델 요청은 보내지 않습니다. 앱이 대화를 열어 writer를 유지하면 건너뛰고 다음 실행에서 다시 확인합니다. 내부 하위 에이전트·검토 대화와 Mindlogic에 없는 모델은 건드리지 않습니다.
+
+```bash
+python3 thread_sync.py install
+python3 thread_sync.py run
+python3 thread_sync.py remove
+```
+
+이 자동 재시도는 **현재 로드된 대화의 제공자를 즉시 바꾸지 못합니다.** 앱이 writer를 해제하기 전에 그 대화에서 요청을 보내면 기존 제공자로 갈 수 있습니다. 또한 기본 모델 메뉴에서 제공자까지 전환하는 기능을 대신하지 않습니다. 한도 초과 상황에서 확실하게 이어서 쓰려는 대화는 먼저 위의 대화별 재연결 결과를 확인해야 합니다.
+
 ## 제거와 복구
 
 ```bash
