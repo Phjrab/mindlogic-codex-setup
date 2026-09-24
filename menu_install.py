@@ -270,7 +270,9 @@ def install() -> None:
                 path.unlink(missing_ok=True)
         raise
     print(f"Installed: {len(catalog['models'])} picker models, {len(manifest['routes'])} routes")
-    print("First application may require reopening the Codex app; later model changes use the existing picker.")
+    print("First application may require reopening the Codex app.")
+    print("Warning: the desktop app may block Mindlogic input when OpenAI usage is exhausted;")
+    print("picker visibility and CLI routing do not verify desktop-app routing.")
 
 
 def refresh() -> None:
@@ -308,6 +310,8 @@ def status() -> None:
     print("Configured model:", parsed.get("model", "Codex default"))
     print("Catalog:", parsed.get("model_catalog_json", "Codex default"))
     print("Router service:", "configured" if AGENT.exists() else "absent")
+    if installed and parsed.get("model_provider") != PROVIDER:
+        print("Menu router is inactive; the user's current provider setting was preserved.")
     print("Observed app thread provider: unverified")
     print("Observed upstream request: unverified (see secret-free router log after a user request)")
 
