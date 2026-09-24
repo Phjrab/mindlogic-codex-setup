@@ -12,6 +12,40 @@ import menu_router
 
 
 class ConfigTests(unittest.TestCase):
+    def test_menu_activation_restores_missing_provider_and_catalog(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            config = root / "config.toml"
+            section = ('[model_providers.mindlogic_menu_router]\n'
+                       'name = "Local router"\nbase_url = "http://127.0.0.1:18762"\n'
+                       'wire_api = "responses"\nrequires_openai_auth = false\n')
+            config.write_text('model = "gpt-6-luna"\nmodel_reasoning_effort = "high"\n\n' + section)
+            state = root / "state.json"
+            state.write_text(json.dumps({"provider_section": section}))
+            manifest = root / "routes.json"
+            manifest.write_text(json.dumps({"routes": {
+                "gpt-6-luna": {"provider": "openai", "model": "gpt-6-luna"},
+                "mindlogic--gpt-6-luna": {"provider": "mindlogic", "model": "gpt-6-luna"}}}))
+            catalog = root / "catalog.json"
+            catalog.write_text(json.dumps({"models": [{"slug": "gpt-6-luna"},
+                                                        {"slug": "mindlogic--gpt-6-luna"}]}))
+            with patch.multiple(menu_install, CONFIG=config, STATE=state, MANIFEST=manifest,
+                                CATALOG=catalog), patch.object(menu_install, "backup"), \
+                    patch.object(menu_install, "launch"), patch.object(menu_install, "await_router_health"):
+                menu_install.activate()
+            parsed = tomllib.loads(config.read_text())
+            self.assertEqual(parsed["model_provider"], "mindlogic_menu_router")
+            self.assertEqual(parsed["model"], "mindlogic--gpt-6-luna")
+            self.assertEqual(parsed["model_catalog_json"], str(catalog))
+            self.assertEqual(parsed["model_reasoning_effort"], "high")
+
+    def test_mindlogic_alias_maps_plain_and_legacy_model_ids(self):
+        routes = {"mindlogic--gpt-6-luna": {"provider": "mindlogic", "model": "gpt-6-luna"}}
+        self.assertEqual(menu_install.mindlogic_alias_for_model("gpt-6-luna", routes),
+                         "mindlogic--gpt-6-luna")
+        self.assertEqual(menu_install.mindlogic_alias_for_model("mindlogic/gpt-6-luna", routes),
+                         "mindlogic--gpt-6-luna")
+
     def test_preserves_quoted_tables_keys_and_multiline_heading(self):
         original = '''"model" = "gpt-6-astra" # keep original comment
 model_provider = 'openai'
@@ -24,11 +58,11 @@ base_url = 'https://example.test'
 enabled = true
 '''
         changed = menu_install.edit_config(original, {
-            "model": "mindlogic/gpt-6-luna", "model_provider": "mindlogic_menu_router",
+            "model": "mindlogic--gpt-6-luna", "model_provider": "mindlogic_menu_router",
             "model_catalog_json": "/tmp/catalog.json"},
             provider_section='[model_providers.mindlogic_menu_router]\nbase_url = "http://127.0.0.1:18762"\n')
         parsed = tomllib.loads(changed)
-        self.assertEqual(parsed["model"], "mindlogic/gpt-6-luna")
+        self.assertEqual(parsed["model"], "mindlogic--gpt-6-luna")
         self.assertIn('[Example]', changed)
         self.assertIn('[model_providers."factchat"] # comment', changed)
         self.assertTrue(parsed["unrelated"]["enabled"])
@@ -36,8 +70,8 @@ enabled = true
 
     def test_single_quote_and_comment_heading(self):
         original = "model = 'gpt-6-luna'\n[model_providers.factchat] # comment\nbase_url = 'https://example.test'\n"
-        changed = menu_install.edit_config(original, {"model": "mindlogic/gpt-6-sol"})
-        self.assertEqual(tomllib.loads(changed)["model"], "mindlogic/gpt-6-sol")
+        changed = menu_install.edit_config(original, {"model": "mindlogic--gpt-6-sol"})
+        self.assertEqual(tomllib.loads(changed)["model"], "mindlogic--gpt-6-sol")
         self.assertIn('[model_providers.factchat] # comment', changed)
 
     def test_backup_is_unique(self):
@@ -58,13 +92,13 @@ enabled = true
             paths = {"HOME": root, "CONFIG": config, "CATALOG": root / "catalog.json",
                      "MANIFEST": root / "routes.json", "STATE": root / "state.json",
                      "ROUTER": root / "bin" / "router.py", "AGENT": root / "agent.plist"}
-            catalog = {"models": [{"slug": "gpt-6-sol"}, {"slug": "mindlogic/gpt-6-sol"}]}
+            catalog = {"models": [{"slug": "gpt-6-sol"}, {"slug": "mindlogic--gpt-6-sol"}]}
             routes = {"routes": {"gpt-6-sol": {"provider": "openai", "model": "gpt-6-sol"},
-                     "mindlogic/gpt-6-sol": {"provider": "mindlogic", "model": "gpt-6-sol"}}}
+                     "mindlogic--gpt-6-sol": {"provider": "mindlogic", "model": "gpt-6-sol"}}}
             with patch.multiple(menu_install, **paths), patch.object(menu_install, "catalog_and_routes", return_value=(catalog, routes)), patch.object(menu_install, "launch"), patch.object(menu_install, "await_router_health"):
                 menu_install.install()
                 installed = tomllib.loads(config.read_text())
-                self.assertEqual(installed["model"], "mindlogic/gpt-6-sol")
+                self.assertEqual(installed["model"], "mindlogic--gpt-6-sol")
                 self.assertFalse(installed["model_providers"]["mindlogic_menu_router"]["requires_openai_auth"])
                 self.assertIn("X-Mindlogic-Router-Token",
                               installed["model_providers"]["mindlogic_menu_router"]["http_headers"])
@@ -84,7 +118,7 @@ enabled = true
                                                              'model_provider = "mindlogic_menu_router"', 1))
                 with self.assertRaises(ValueError):
                     menu_install.install()
-                config.write_text(config.read_text().replace('model = "mindlogic/gpt-6-sol"', 'model = "gpt-6-sol"'))
+                config.write_text(config.read_text().replace('model = "mindlogic--gpt-6-sol"', 'model = "gpt-6-sol"'))
                 menu_install.remove()
                 self.assertEqual(tomllib.loads(config.read_text())["other"]["value"], 7)
                 self.assertEqual(tomllib.loads(config.read_text())["model_provider"], "factchat")
@@ -99,9 +133,9 @@ enabled = true
             paths = {"HOME": root, "CONFIG": config, "CATALOG": root / "catalog.json",
                      "MANIFEST": root / "routes.json", "STATE": root / "state.json",
                      "ROUTER": root / "bin" / "router.py", "AGENT": root / "agent.plist"}
-            catalog = {"models": [{"slug": "gpt-6-sol"}, {"slug": "mindlogic/gpt-6-sol"}]}
+            catalog = {"models": [{"slug": "gpt-6-sol"}, {"slug": "mindlogic--gpt-6-sol"}]}
             routes = {"routes": {"gpt-6-sol": {"provider": "openai", "model": "gpt-6-sol"},
-                     "mindlogic/gpt-6-sol": {"provider": "mindlogic", "model": "gpt-6-sol"}}}
+                     "mindlogic--gpt-6-sol": {"provider": "mindlogic", "model": "gpt-6-sol"}}}
             with patch.multiple(menu_install, **paths), patch.object(menu_install, "catalog_and_routes", return_value=(catalog, routes)), patch.object(menu_install, "launch"), patch.object(menu_install, "await_router_health", side_effect=RuntimeError("not ready")):
                 with self.assertRaises(RuntimeError):
                     menu_install.install()
@@ -141,7 +175,7 @@ class RouterTests(unittest.TestCase):
         self.env.write_text('FACTCHAT_API_KEY=secret-mindlogic\n')
         self.server = menu_router.Router(("127.0.0.1", 0), manifest={"local_token":"local-test", "routes": {
             "gpt-6-sol": {"provider": "openai", "model": "gpt-6-sol"},
-            "mindlogic/gpt-6-sol": {"provider": "mindlogic", "model": "gpt-6-sol"}}}, env_file=self.env)
+            "mindlogic--gpt-6-sol": {"provider": "mindlogic", "model": "gpt-6-sol"}}}, env_file=self.env)
         self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
         self.thread.start()
         self.patch = patch.object(menu_router, "HTTPSConnection", FakeConnection)
@@ -172,7 +206,7 @@ class RouterTests(unittest.TestCase):
         return status, data
 
     def test_routes_and_separates_credentials_and_tools(self):
-        for model in ("gpt-6-sol", "mindlogic/gpt-6-sol", "gpt-6-sol"):
+        for model in ("gpt-6-sol", "mindlogic--gpt-6-sol", "gpt-6-sol"):
             status, data = self.request(model, openai_auth=model == "gpt-6-sol")
             self.assertEqual(status, 200)
             self.assertIn(b"response.completed", data)
@@ -189,20 +223,20 @@ class RouterTests(unittest.TestCase):
 
     def test_unknown_alias_and_server_reference_are_rejected(self):
         self.assertEqual(self.request("unknown")[0], 400)
-        self.assertEqual(self.request("mindlogic/gpt-6-sol", {"previous_response_id": "resp_other"})[0], 409)
+        self.assertEqual(self.request("mindlogic--gpt-6-sol", {"previous_response_id": "resp_other"})[0], 409)
         self.assertEqual(FakeConnection.calls, [])
 
     def test_reasoning_is_kept_only_on_stable_route(self):
         self.request("gpt-6-sol", openai_auth=True)
         self.request("gpt-6-sol", openai_auth=True)
-        self.request("mindlogic/gpt-6-sol")
+        self.request("mindlogic--gpt-6-sol")
         self.assertEqual(len(FakeConnection.calls[0][2]["input"]), 2)
         self.assertEqual(len(FakeConnection.calls[1][2]["input"]), 3)
         self.assertEqual(len(FakeConnection.calls[2][2]["input"]), 2)
 
     def test_local_auth_is_required(self):
         conn = http.client.HTTPConnection("127.0.0.1", self.server.server_port)
-        conn.request("POST", "/responses", '{"model":"mindlogic/gpt-6-sol","input":[]}',
+        conn.request("POST", "/responses", '{"model":"mindlogic--gpt-6-sol","input":[]}',
                      {"Authorization": "Bearer fake", "Content-Type": "application/json"})
         result = conn.getresponse()
         self.assertEqual(result.status, 401)
@@ -211,7 +245,7 @@ class RouterTests(unittest.TestCase):
         self.assertEqual(FakeConnection.calls, [])
 
     def test_mindlogic_needs_no_openai_auth_and_openai_fails_closed(self):
-        status, data = self.request("mindlogic/gpt-6-sol")
+        status, data = self.request("mindlogic--gpt-6-sol")
         self.assertEqual(status, 200)
         self.assertIn(b"response.completed", data)
         self.assertEqual(FakeConnection.calls[0][0], menu_router.MINDLOGIC_HOST)
@@ -220,16 +254,16 @@ class RouterTests(unittest.TestCase):
         self.assertEqual(len(FakeConnection.calls), 1)
 
     def test_wrong_local_token_blocks_both_routes(self):
-        for model in ("gpt-6-sol", "mindlogic/gpt-6-sol"):
+        for model in ("gpt-6-sol", "mindlogic--gpt-6-sol"):
             self.assertEqual(self.request(model, openai_auth=True, local_token="wrong")[0], 401)
         self.assertEqual(FakeConnection.calls, [])
 
     def test_mindlogic_upstream_errors_never_fall_back_to_openai(self):
         for upstream_status in (401, 429):
             with patch.object(FakeResponse, "status", upstream_status):
-                self.assertEqual(self.request("mindlogic/gpt-6-sol")[0], upstream_status)
+                self.assertEqual(self.request("mindlogic--gpt-6-sol")[0], upstream_status)
         with patch.object(FakeConnection, "getresponse", side_effect=OSError("offline")):
-            self.assertEqual(self.request("mindlogic/gpt-6-sol")[0], 502)
+            self.assertEqual(self.request("mindlogic--gpt-6-sol")[0], 502)
         self.assertEqual([call[0] for call in FakeConnection.calls],
                          [menu_router.MINDLOGIC_HOST] * 3)
 

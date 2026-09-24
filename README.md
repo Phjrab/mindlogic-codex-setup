@@ -19,7 +19,9 @@ python3 setup.py menu-install
 python3 setup.py menu-status
 ```
 
-설치 당시 앱이 모델 목록을 캐시했다면 **처음 한 번만** 앱을 다시 여세요. 기본 모델 메뉴에서 기존 `GPT-6 Sol` 같은 항목은 OpenAI, `Mindlogic · GPT-6 Sol` 같은 항목은 Mindlogic을 뜻하도록 구성했습니다. 같은 upstream 모델 ID라도 메뉴 ID는 `gpt-6-sol`과 `mindlogic/gpt-6-sol`로 분리됩니다. **선택 후 앱이 요청을 허용하고 라우터 로그에 목적지가 기록됐는지 확인해야 합니다.** OpenAI 한도 초과 시에는 메뉴에서 Mindlogic을 선택해도 입력 단계에서 막힌 사례가 있습니다.
+메뉴 제공자나 카탈로그 경로가 사용자 설정에서 빠졌으면 `python3 setup.py menu-activate`로 설치된 메뉴를 다시 활성화할 수 있습니다. 기존 대화의 제공자와 모델은 이 명령으로 바뀌지 않습니다. 해당 대화만 Mindlogic 메뉴 경로로 옮길 때는 유휴 상태에서 앱 writer를 해제한 뒤 `python3 setup.py menu-thread-mindlogic <THREAD_ID>`를 실행합니다. 이 명령은 대화 ID와 이력을 유지하고 모델 요청은 보내지 않습니다.
+
+설치 당시 앱이 모델 목록을 캐시했다면 **처음 한 번만** 앱을 다시 여세요. 기본 모델 메뉴에서 기존 `GPT-6 Sol` 같은 항목은 OpenAI, `Mindlogic · GPT-6 Sol` 같은 항목은 Mindlogic을 뜻하도록 구성했습니다. 같은 upstream 모델 ID라도 메뉴 ID는 `gpt-6-sol`과 `mindlogic--gpt-6-sol`로 분리됩니다. 이전 슬래시 별칭은 앱 메뉴에서 선택만 해도 일반 모델 ID로 저장되는 동작이 확인돼, 새 메뉴 항목에는 슬래시 없는 별칭을 사용합니다. **선택 후 앱이 요청을 허용하고 라우터 로그에 목적지가 기록됐는지 확인해야 합니다.**
 
 설치 시 현재 OpenAI 계정의 `~/.codex/models_cache.json` 목록을 복제하여 기존 모델 항목을 보존하고, Mindlogic 계정에서 조회되는 모델 중 같은 upstream 모델의 Codex 메타데이터가 있는 것만 추가합니다. 새 모델이 **계정에 추가되었을 때만** `python3 setup.py menu-refresh`를 실행합니다. 카탈로그 자체를 갱신한 뒤에는 앱을 다시 열어야 목록이 갱신될 수 있습니다. 이미 등록된 모델 사이의 평소 전환에는 이 명령을 쓰지 않습니다.
 
@@ -38,7 +40,7 @@ python3 setup.py menu-thread <기존-threadId>
 | 메뉴 ID | 실제 모델 | 목적지 | 인증 |
 | --- | --- | --- | --- |
 | `gpt-6-sol` | `gpt-6-sol` | `chatgpt.com/backend-api/codex/responses` | 기존 ChatGPT bearer |
-| `mindlogic/gpt-6-sol` | `gpt-6-sol` | `factchat-cloud.mindlogic.ai/v1/gateway/responses` | 기존 `FACTCHAT_API_KEY` |
+| `mindlogic--gpt-6-sol` | `gpt-6-sol` | `factchat-cloud.mindlogic.ai/v1/gateway/responses` | 기존 `FACTCHAT_API_KEY` |
 
 OpenAI 인증 헤더는 Mindlogic에 전달하지 않습니다. 라우터는 SSE 데이터를 순서대로 전달하고 클라이언트가 취소하면 upstream 연결을 닫습니다. `store=false`를 유지하고 `previous_response_id`·`conversation` 같은 서버 종속 참조가 있으면 명시적으로 거절합니다. 제공자를 바꾸거나 라우터가 재시작된 첫 요청에서는 다른 제공자의 암호화된 reasoning 항목을 제외합니다. 보이는 대화 이력과 도구 호출·결과 항목은 유지합니다. 연결 실패 시 다른 제공자로 자동 우회하지 않습니다. 로그에는 별칭, 실제 모델, 목적지, 인증 **종류**, 요청 ID, HTTP 상태만 남기며 토큰과 본문을 기록하지 않습니다.
 
@@ -60,12 +62,13 @@ OpenAI 인증 헤더는 Mindlogic에 전달하지 않습니다. 라우터는 SSE
 | 무인증 로컬 요청 | PASS | HTTP 401 |
 | OpenAI Bearer 없는 Mindlogic 라우터 요청 | PASS (모의 upstream) | 별도 로컬 토큰과 Mindlogic 키만으로 SSE 완료; OpenAI 경로는 인증 없으면 upstream 호출 없이 503 |
 | 기존 대화의 앱 지원 도구 후속 요청 | PASS (메뉴 조작 아님) | 인증 분리 후보에서 Gateway HTTP 200과 응답을 확인하고, 같은 ID·이력·경로로 `factchat / gpt-6-luna` 직접 연결을 복구함 |
-| 인증 분리 후보의 기본 앱 입력 | NOT TESTED | 실제 앱의 메뉴 선택·전송 판정·라우터 도달은 별도 확인 필요 |
+| 새 인증 분리 후보의 기본 앱 입력 | NOT TESTED | 새 슬래시 없는 별칭의 메뉴 선택·전송 판정·라우터 도달은 별도 확인 필요 |
+| 슬래시 별칭의 기본 앱 선택 | FAIL (이전 별칭) | 메뉴 클릭 직후 `mindlogic/gpt-6-luna`가 `gpt-6-luna`로 저장되어 OpenAI 라우트의 인증 오류가 발생함. 새 `mindlogic--...` 별칭은 별도 UI 검증 필요 |
 | 복구 | PASS (모의) | 설치·반복 설치 거부·메뉴 선택 후 설정 복원 시험 통과 |
 
 `python3 -m unittest -v test_menu.py`는 TOML의 주석·따옴표 키·작은따옴표 문자열·여러 줄 문자열, 백업 이름, 설치·복구, 모의 제공자 분기·키 분리·SSE·도구 항목·오류를 검사합니다. CLI 결과는 기본 앱 메뉴 조작 성공을 대신하지 않습니다. 현재 주목표인 **기본 앱에서 재시작·터미널 명령 없이 OpenAI → Mindlogic → OpenAI 전환**은 달성되지 않았습니다. 사용자가 현재 `factchat` 직접 연결로 돌린 설정은 그대로 두었습니다. 지정 대화는 한도 차단을 피하기 위해 라우터 제공자에서 Mindlogic 직접 제공자로 재연결했습니다. 한도 차단의 정확한 위치와 지원되는 해결 인터페이스가 확인되기 전까지 라우터를 다시 활성화하거나 테스트용 OpenAI 요청을 보내지 마세요.
 
-같은 복구가 필요한 다른 유휴 대화는 해당 대화만 앱에서 보관·보관 해제하여 writer를 해제한 뒤 `python3 setup.py mindlogic-thread <threadId>`로 직접 Mindlogic 제공자에 재연결할 수 있습니다. 이 명령은 `mindlogic/...` 메뉴 별칭도 원래 모델 ID로 변환하며 요청은 보내지 않습니다. 재연결 후 원래 앱에서 이어서 작업할 때 실제 요청 목적지를 확인하세요.
+같은 복구가 필요한 다른 유휴 대화는 해당 대화만 앱에서 보관·보관 해제하여 writer를 해제한 뒤 `python3 setup.py mindlogic-thread <threadId>`로 직접 Mindlogic 제공자에 재연결할 수 있습니다. 이 명령은 기존 `mindlogic/...` 및 새 `mindlogic--...` 메뉴 별칭을 원래 모델 ID로 변환하며 요청은 보내지 않습니다. 재연결 후 원래 앱에서 이어서 작업할 때 실제 요청 목적지를 확인하세요.
 
 ### Mindlogic 직접 연결 시 기존 대화 자동 재연결
 

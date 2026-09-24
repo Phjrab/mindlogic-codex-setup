@@ -36,6 +36,23 @@ PROVIDER = "mindlogic_menu_router"
 MANAGED_KEYS = ("model", "model_provider", "model_catalog_json")
 
 
+def mindlogic_alias(slug: str) -> str:
+    # The desktop picker drops the provider segment of slash-separated slugs.
+    return f"mindlogic--{slug}"
+
+
+def mindlogic_alias_for_model(model: str, routes: dict) -> str:
+    upstream_model = model
+    for prefix in ("mindlogic/", "mindlogic--"):
+        if upstream_model.startswith(prefix):
+            upstream_model = upstream_model.removeprefix(prefix)
+            break
+    alias = mindlogic_alias(upstream_model)
+    if alias not in routes or routes[alias].get("provider") != "mindlogic":
+        raise ValueError("This model is not available through Mindlogic")
+    return alias
+
+
 def sha256(data: str) -> str:
     return hashlib.sha256(data.encode()).hexdigest()
 
@@ -160,7 +177,7 @@ def catalog_and_routes() -> tuple[dict, dict]:
             unsupported.append(slug)
             continue
         item = copy.deepcopy(template)
-        alias = f"mindlogic/{slug}"
+        alias = mindlogic_alias(slug)
         item.update(slug=alias, display_name=f"Mindlogic · {name}",
                     description="Mindlogic Gateway", visibility="list",
                     supported_in_api=True, supports_search_tool=False,
@@ -171,6 +188,7 @@ def catalog_and_routes() -> tuple[dict, dict]:
                                        else {"low", "medium", "high", "xhigh", "max"})]
         mindlogic.append(item)
         routes[alias] = {"provider": "mindlogic", "model": slug}
+        routes[f"mindlogic/{slug}"] = {"provider": "mindlogic", "model": slug}
     if not mindlogic:
         raise ValueError("No Mindlogic model has verified matching Codex metadata")
     return {"models": openai + mindlogic}, {"routes": routes, "unsupported": unsupported}
@@ -223,11 +241,11 @@ def install() -> None:
     catalog, manifest = catalog_and_routes()
     manifest["local_token"] = secrets.token_urlsafe(32)
     current_model = parsed.get("model", "gpt-6-sol")
-    if parsed.get("model_provider") == "factchat" and f"mindlogic/{current_model}" in manifest["routes"]:
-        selected = f"mindlogic/{current_model}"
+    if parsed.get("model_provider") == "factchat" and mindlogic_alias(current_model) in manifest["routes"]:
+        selected = mindlogic_alias(current_model)
     else:
         selected = current_model if current_model in manifest["routes"] else next(
-            x for x in manifest["routes"] if x.startswith("mindlogic/"))
+            x for x in manifest["routes"] if x.startswith("mindlogic--"))
     section = (f'[model_providers.{PROVIDER}]\nname = "Codex model menu router"\n'
                f'base_url = "http://127.0.0.1:{PORT}"\nwire_api = "responses"\n'
                f'requires_openai_auth = false\nhttp_headers = {{ X-Mindlogic-Router-Token = "{manifest["local_token"]}" }}\n')
@@ -339,6 +357,48 @@ def isolate_local_auth() -> None:
     print("Installed local-only router authentication; selected provider and model were preserved")
 
 
+def activate() -> None:
+    """Restore the installed menu router as the default without discarding user settings."""
+    if not STATE.is_file() or not MANIFEST.is_file() or not CATALOG.is_file():
+        raise ValueError("Menu router is not installed; run menu-install first")
+    source = CONFIG.read_text()
+    parsed = tomllib.loads(source)
+    state = json.loads(STATE.read_text())
+    section = state.get("provider_section", "")
+    if not section or source.count(section) != 1:
+        raise ValueError("Installed router provider settings changed; refusing to overwrite them")
+    routes = json.loads(MANIFEST.read_text()).get("routes", {})
+    catalog_models = {item.get("slug") for item in json.loads(CATALOG.read_text()).get("models", [])}
+    current_model = parsed.get("model")
+    candidates = []
+    if isinstance(current_model, str):
+        for prefix in ("mindlogic/", "mindlogic--"):
+            if current_model.startswith(prefix):
+                candidates.insert(0, mindlogic_alias(current_model.removeprefix(prefix)))
+        if current_model in routes and routes[current_model].get("provider") == "openai":
+            candidates.insert(0, mindlogic_alias(current_model))
+        candidates.append(current_model)
+    selected = next((candidate for candidate in candidates
+                     if candidate in catalog_models and candidate in routes), None)
+    if selected is None:
+        raise ValueError("Current model has no installed Mindlogic menu entry; choose a supported model before activating")
+    values = {"model": selected, "model_provider": PROVIDER, "model_catalog_json": str(CATALOG)}
+    updated = edit_config(source, values)
+    if updated == source:
+        print("Mindlogic menu is already active")
+        return
+    backup(CONFIG)
+    atomic_bytes(CONFIG, updated.encode(), CONFIG.stat().st_mode & 0o777)
+    try:
+        launch("kickstart")
+        await_router_health()
+    except BaseException:
+        atomic_bytes(CONFIG, source.encode(), CONFIG.stat().st_mode & 0o777)
+        launch("kickstart")
+        raise
+    print("Mindlogic model menu activated; existing thread providers were not changed")
+
+
 def status() -> None:
     installed = STATE.exists()
     parsed = tomllib.loads(CONFIG.read_text()) if CONFIG.exists() else {}
@@ -404,7 +464,7 @@ def switch_thread(thread_id: str) -> None:
         if original_provider == PROVIDER:
             print("Thread already uses the menu router")
             return
-        alias = f"mindlogic/{original_model}" if original_provider == "factchat" else original_model
+        alias = mindlogic_alias(original_model) if original_provider == "factchat" else original_model
         if original_provider not in ("factchat", "openai") or alias not in routes:
             raise ValueError("This thread's provider or model is not in the router catalog")
         cwd, project_id, source = thread["cwd"], thread.get("projectId"), thread.get("source")
@@ -424,14 +484,50 @@ def switch_thread(thread_id: str) -> None:
     print(f"Thread {thread_id} now uses the menu router with {alias}")
 
 
+def switch_thread_to_mindlogic(thread_id: str) -> None:
+    """Select the Mindlogic route for an existing, unloaded thread without a model call."""
+    if str(uuid.UUID(thread_id)) != thread_id:
+        raise ValueError("Use the exact canonical threadId")
+    if not STATE.exists() or tomllib.loads(CONFIG.read_text()).get("model_provider") != PROVIDER:
+        raise ValueError("Activate the menu router first")
+    routes = json.loads(MANIFEST.read_text())["routes"]
+    with setup.AppServer() as server:
+        thread = server.call("thread/read", {"threadId": thread_id})["thread"]
+        if thread["id"] != thread_id or thread["status"]["type"] != "notLoaded":
+            raise ValueError("Thread is still loaded; wait until it is idle and unload only this thread")
+        original_model = thread.get("model")
+        if not isinstance(original_model, str):
+            raise ValueError("Thread has no model ID")
+        alias = mindlogic_alias_for_model(original_model, routes)
+        upstream_model = routes[alias]["model"]
+        cwd, project_id, source = thread["cwd"], thread.get("projectId"), thread.get("source")
+        turns = len(thread.get("turns", []))
+        resumed = server.call("thread/resume", {
+            "threadId": thread_id, "modelProvider": PROVIDER, "model": alias,
+        })
+        if (resumed["thread"]["id"] != thread_id or resumed["modelProvider"] != PROVIDER
+                or resumed["model"] != alias or Path(resumed["cwd"]).resolve() != Path(cwd).resolve()
+                or resumed["thread"].get("projectId") != project_id
+                or resumed["thread"].get("source") != source
+                or len(resumed["thread"].get("turns", [])) != turns):
+            raise ValueError("Resume did not preserve the original thread; do not send a prompt")
+    with setup.AppServer() as server:
+        after = server.call("thread/read", {"threadId": thread_id})["thread"]
+        if (after["id"] != thread_id or after["modelProvider"] != PROVIDER
+                or after.get("model") != alias or Path(after["cwd"]).resolve() != Path(cwd).resolve()
+                or after.get("projectId") != project_id or after.get("source") != source):
+            raise ValueError("Mindlogic model alias was not persisted; do not send a prompt")
+    print(f"Existing thread now selects Mindlogic for {upstream_model}; no model request was sent")
+
+
 def main(action: str, thread_id: str | None = None) -> None:
     try:
-        if action == "menu-thread":
+        if action in ("menu-thread", "menu-thread-mindlogic"):
             if not thread_id:
-                raise ValueError("Usage: python3 setup.py menu-thread THREAD_ID")
-            switch_thread(thread_id)
+                raise ValueError(f"Usage: python3 setup.py {action} THREAD_ID")
+            (switch_thread_to_mindlogic if action == "menu-thread-mindlogic" else switch_thread)(thread_id)
         else:
-            {"menu-install": install, "menu-refresh": refresh,
+            {"menu-install": install, "menu-refresh": refresh, "menu-activate": activate,
              "menu-auth-isolate": isolate_local_auth, "menu-status": status,
              "menu-remove": remove}[action]()
     except (ValueError, RuntimeError, OSError, tomllib.TOMLDecodeError) as error:

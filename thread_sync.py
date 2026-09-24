@@ -57,7 +57,12 @@ def candidates() -> list[tuple[str, str, bool]]:
     for thread_id, provider, model, archived in rows:
         if not isinstance(model, str):
             continue
-        direct_model = model.removeprefix("mindlogic/") if provider == "mindlogic_menu_router" else model
+        direct_model = model
+        if provider == "mindlogic_menu_router":
+            for prefix in ("mindlogic/", "mindlogic--"):
+                if model.startswith(prefix):
+                    direct_model = model.removeprefix(prefix)
+                    break
         if direct_model in available:
             selected.append((thread_id, direct_model, bool(archived)))
     return selected

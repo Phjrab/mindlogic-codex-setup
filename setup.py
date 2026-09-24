@@ -376,8 +376,11 @@ def switch_existing_thread(thread_id: str, *, preserve_archive: bool = False) ->
         if thread["status"]["type"] != "notLoaded":
             fail("대화가 아직 로드되어 있습니다. 앱에서 해당 대화를 보관한 뒤 다시 보관 해제하고, 다른 대화에서 이 명령을 실행하세요.")
         model = thread.get("model") or top_level_value(CONFIG.read_text(), "model")
-        if thread.get("modelProvider") == "mindlogic_menu_router" and isinstance(model, str) and model.startswith("mindlogic/"):
-            model = model.removeprefix("mindlogic/")
+        if thread.get("modelProvider") == "mindlogic_menu_router" and isinstance(model, str):
+            for prefix in ("mindlogic/", "mindlogic--"):
+                if model.startswith(prefix):
+                    model = model.removeprefix(prefix)
+                    break
         if model not in supported:
             fail(f"대화 모델 {model!r}은 현재 Mindlogic 모델 목록에 없습니다. 모델을 바꾼 뒤 다시 시도하세요.")
         cwd = thread["cwd"]
@@ -422,12 +425,12 @@ def switch_existing_thread(thread_id: str, *, preserve_archive: bool = False) ->
 
 def main() -> None:
     action = sys.argv[1] if len(sys.argv) >= 2 else None
-    if action in ("menu-install", "menu-refresh", "menu-auth-isolate", "menu-status", "menu-remove"):
+    if action in ("menu-install", "menu-refresh", "menu-activate", "menu-auth-isolate", "menu-status", "menu-remove"):
         if len(sys.argv) != 2:
             fail(f"Usage: python3 setup.py {action}")
         import menu_install
         menu_install.main(action)
-    elif action == "menu-thread" and len(sys.argv) == 3:
+    elif action in ("menu-thread", "menu-thread-mindlogic") and len(sys.argv) == 3:
         import menu_install
         menu_install.main(action, sys.argv[2])
     elif action == "install":
@@ -447,7 +450,7 @@ def main() -> None:
             fail("Usage: python3 setup.py mindlogic-thread THREAD_ID [--preserve-archive]")
         switch_existing_thread(sys.argv[2], preserve_archive=len(sys.argv) == 4)
     else:
-        fail("Usage: python3 setup.py {install|openai|mindlogic|status|mindlogic-thread THREAD_ID}")
+        fail("Usage: python3 setup.py {install|openai|mindlogic|status|mindlogic-thread THREAD_ID|menu-install|menu-activate|menu-thread-mindlogic THREAD_ID}")
 
 
 if __name__ == "__main__":

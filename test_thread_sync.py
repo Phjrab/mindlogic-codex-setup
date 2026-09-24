@@ -23,7 +23,8 @@ class CandidateSafetyTests(unittest.TestCase):
                 connection.executemany("INSERT INTO threads VALUES (?,?,?,?,?,?)", [
                     ("user-openai", "openai", "gpt-6-sol", 0, "user", 4),
                     ("user-router", "mindlogic_menu_router", "mindlogic/gpt-5.6-sol", 0, "user", 3),
-                    ("archived", "openai", "gpt-6-sol", 1, "user", 2),
+                    ("user-router-new", "mindlogic_menu_router", "mindlogic--gpt-6-sol", 0, "user", 2),
+                    ("archived", "openai", "gpt-6-sol", 1, "user", 1),
                     ("agent", "openai", "gpt-6-sol", 0, "subagent", 1),
                     ("unsupported", "openai", "gpt-5.3-codex-spark", 0, "user", 0),
                 ])
@@ -32,6 +33,7 @@ class CandidateSafetyTests(unittest.TestCase):
                 self.assertEqual(thread_sync.candidates(), [
                     ("user-openai", "gpt-6-sol", False),
                     ("user-router", "gpt-5.6-sol", False),
+                    ("user-router-new", "gpt-6-sol", False),
                     ("archived", "gpt-6-sol", True),
                 ])
                 (home / "config.toml").write_text('model_provider = "openai"\n')
