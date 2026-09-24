@@ -88,11 +88,12 @@ def native_catalog() -> dict:
     with tempfile.TemporaryDirectory(prefix="mindlogic-codex-") as clean_home:
         env = dict(os.environ, CODEX_HOME=clean_home)
         result = subprocess.run(
-            [codex_executable(), "debug", "models"],
+            [codex_executable(), "debug", "models", "--bundled"],
             env=env,
             text=True,
             capture_output=True,
             check=False,
+            timeout=20,
         )
     if result.returncode:
         fail("Codex 모델 메타데이터를 읽지 못했습니다. 이 Codex 버전은 'codex debug models'가 필요합니다.")
@@ -398,7 +399,15 @@ def switch_existing_thread(thread_id: str) -> None:
 
 def main() -> None:
     action = sys.argv[1] if len(sys.argv) >= 2 else None
-    if action == "install":
+    if action in ("menu-install", "menu-refresh", "menu-status", "menu-remove"):
+        if len(sys.argv) != 2:
+            fail(f"Usage: python3 setup.py {action}")
+        import menu_install
+        menu_install.main(action)
+    elif action == "menu-thread" and len(sys.argv) == 3:
+        import menu_install
+        menu_install.main(action, sys.argv[2])
+    elif action == "install":
         if len(sys.argv) != 2:
             fail("Usage: python3 setup.py install")
         install()

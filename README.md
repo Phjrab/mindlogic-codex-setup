@@ -1,70 +1,68 @@
-# Mindlogic 모델을 Codex에서 사용하기
+# Codex 기본 모델 메뉴에서 OpenAI·Mindlogic 선택
 
-Mindlogic Gateway의 OpenAI 모델을 로컬 Codex 앱과 CLI의 모델 메뉴에 추가하고, Mindlogic과 기본 OpenAI 제공자를 전환하는 설치 스크립트입니다. 각자 계정에서 실제로 조회되는 모델만 추가합니다.
+macOS ChatGPT/Codex 앱의 **기존 모델 선택 메뉴**에 OpenAI 모델과 `Mindlogic · ...` 모델을 함께 표시하는 로컬 구성입니다. 첫 설치 이후 등록된 모델 간 선택에는 터미널 명령이나 앱 재시작이 필요하지 않도록 설계했습니다. `mindlogic/...` 항목을 고르면 Mindlogic Gateway로, 기존 모델 이름을 고르면 기존 ChatGPT 로그인 경로로 요청합니다. OpenAI API 키 과금 방식으로 바꾸지 않습니다.
 
-## 확인한 환경
+## 검증 환경과 구현 이유
 
-2026-09-24에 macOS의 **ChatGPT/Codex 데스크톱 앱 26.917.51856**(빌드 10492), 앱에 포함된 **codex-cli 0.155.0-alpha.16**에서 설정했습니다. 이 버전은 테스트 환경을 기록한 것이며 최소 지원 버전을 뜻하지 않습니다. 자신의 버전은 앱의 **About** 화면과 `codex --version`으로 확인하세요. 앱에 포함된 CLI는 macOS에서 `/Applications/ChatGPT.app/Contents/Resources/codex --version`으로도 확인할 수 있습니다.
+2026-09-24의 macOS ChatGPT/Codex 앱 **26.917.51856**(빌드 10492), 내장 CLI **0.155.0-alpha.16**을 기준으로 합니다. 이 버전에서는 모델 선택이 모델을 변경하지만 이미 로드된 대화의 실행 제공자를 바꾸지는 않았습니다. `thread/resume(modelProvider=...)`도 로드된 대화에는 적용되지 않았습니다. 따라서 `model_provider`를 사용자 수준에서 한 번 `mindlogic_menu_router`로 고정하고, 모델 ID별로 로컬 Responses 라우터가 분기합니다.
 
-## 설치
+이 경로는 Codex의 공식 사용자 지정 제공자 설정 `requires_openai_auth = true`, `http_headers`, `model_catalog_json`과 app-server `model/list`를 사용합니다. [인증 설명](https://learn.chatgpt.com/docs/auth#alternative-model-providers)에는 사용자 지정 제공자가 기존 ChatGPT 로그인을 사용할 수 있다고 명시되어 있습니다. [설정 레퍼런스](https://learn.chatgpt.com/docs/config-file/config-reference)와 [App Server 문서](https://learn.chatgpt.com/docs/app-server)를 함께 참고하세요. 라우터는 Codex 바이너리나 앱 서명을 수정하지 않습니다.
 
-필요한 것: Python 3, `curl`, Codex 앱 또는 CLI, 본인에게 발급된 Mindlogic API 키.
+## 설치와 일상 사용
 
-```bash
-git clone https://github.com/Phjrab/mindlogic-codex-setup.git
-cd mindlogic-codex-setup
-python3 setup.py install
-```
-
-스크립트는 기존 `FACTCHAT_API_KEY` 환경변수 또는 `~/.codex/.env`를 사용합니다. 둘 다 없으면 키를 화면에 표시하지 않고 입력받아 `~/.codex/.env`에 저장합니다. **키를 GitHub, 명령 인수, 채팅에 붙여 넣지 마세요.** 설치 후 Codex 앱을 재시작하고 새 채팅에서 `Mindlogic`으로 시작하는 모델을 고르세요. 이미 열린 대화의 전환은 아래 절차를 사용합니다.
-
-설치 과정은 다음과 같습니다.
-
-1. 인증된 `/models/?type=llm` 목록에서 본인 계정의 모델 ID를 확인합니다.
-2. 로컬 Codex CLI의 기본 모델 메타데이터로 `~/.codex/mindlogic-models.json`을 생성합니다. 모델 내부 지침이나 개인 설정은 이 저장소에 포함하지 않습니다.
-3. `~/.codex/config.toml`에 `factchat` 제공자와 모델 목록 경로를 추가합니다. 기존 설정 파일과 모델 목록은 변경 전 백업합니다.
-4. `~/.codex/bin/codex-profile` 명령을 설치합니다.
-
-## 제공자 전환
+기존 `FACTCHAT_API_KEY`는 `~/.codex/.env`에서 사용합니다. 키 값은 로그·설정·저장소에 기록하지 않습니다. 설치 명령은 모델 목록 조회, 기존 설정 백업, 사용자 수준 LaunchAgent 등록을 한 번 수행합니다.
 
 ```bash
-~/.codex/bin/codex-profile status
-~/.codex/bin/codex-profile openai
-~/.codex/bin/codex-profile mindlogic
+python3 setup.py menu-install
+python3 setup.py menu-status
 ```
 
-`openai`는 설치 당시의 OpenAI 모델과 추론 강도를 복원합니다. 설치 당시 이미 다른 제공자를 사용 중이면 OpenAI 쪽 모델은 `gpt-6-astra`로 기록합니다. 이 명령은 **새 대화의 기본 설정**을 바꿉니다. 이미 열린 대화의 실행 제공자는 바꾸지 않습니다. 모델 메뉴 선택도 실행 제공자를 바꾸지 않을 수 있습니다. 새 대화의 모델 메뉴가 그대로라면 앱을 재시작하세요.
+설치 당시 앱이 모델 목록을 캐시했다면 **처음 한 번만** 앱을 다시 여세요. 이후 기본 모델 메뉴에서 기존 `GPT-6 Sol` 같은 항목은 OpenAI, `Mindlogic · GPT-6 Sol` 같은 항목은 Mindlogic을 뜻합니다. 같은 upstream 모델 ID라도 메뉴 ID는 `gpt-6-sol`과 `mindlogic/gpt-6-sol`로 분리됩니다. 이미 시작한 요청은 원래 경로에서 끝나고 다음 요청부터 새 선택을 적용합니다.
 
-## 기존 대화 전환
+설치 시 현재 OpenAI 계정의 `~/.codex/models_cache.json` 목록을 복제하여 기존 모델 항목을 보존하고, Mindlogic 계정에서 조회되는 모델 중 같은 upstream 모델의 Codex 메타데이터가 있는 것만 추가합니다. 새 모델이 **계정에 추가되었을 때만** `python3 setup.py menu-refresh`를 실행합니다. 카탈로그 자체를 갱신한 뒤에는 앱을 다시 열어야 목록이 갱신될 수 있습니다. 이미 등록된 모델 사이의 평소 전환에는 이 명령을 쓰지 않습니다.
 
-Codex 앱 26.917.51856에 포함된 CLI 0.155.0-alpha.16에서는 로드된 대화에 `thread/resume`의 `modelProvider`를 전달해도 실행 제공자가 바뀌지 않았습니다. 같은 대화를 앱에서 언로드한 후 제공자를 명시해 재개하면 바뀌었습니다. 아래 절차는 **같은 threadId와 이력**을 유지하며, 앱 전체 재시작 없이 적용할 수 있습니다.
+기존 대화는 시작 당시 제공자를 유지하므로, 같은 대화에서 두 제공자를 고르려면 **한 번** 라우터 제공자로 재연결해야 합니다. 대화가 유휴 상태인지 확인하고, 앱에서 해당 대화만 보관했다가 보관 해제하여 writer가 내려간 뒤 다음을 실행합니다. 잠금이 남아 있으면 명령은 중단하며 다른 실행 주체를 종료하지 않습니다.
 
-1. 전환할 대화의 작업과 도구 실행이 끝났는지 확인합니다. 그 대화에 추가 시험 요청을 보내지 마세요.
-2. `codex-profile mindlogic`으로 기본 설정을 바꿉니다.
-3. **앱에서 대상 대화만 보관했다가 보관 해제**합니다. 대상 대화를 다시 열기 전, 다른 대화나 독립 터미널에서 아래 명령을 실행합니다. 보관·해제는 해당 대화의 실행 세션을 언로드하기 위한 작업입니다.
+```bash
+python3 setup.py menu-thread <기존-threadId>
+```
 
-   ```bash
-   python3 setup.py mindlogic-thread <기존-threadId>
-   ```
+이 명령은 모델 요청을 보내지 않으며 동일 threadId·프로젝트 경로·이력과 시작 모델을 검증합니다. 이후 그 대화를 원래 앱에서 다시 열어 메뉴를 사용합니다. 새 대화는 설치된 고정 제공자를 바로 사용합니다. 다른 기존 대화도 필요할 때 각각 한 번만 재연결합니다.
 
-4. 명령이 동일 ID의 저장된 실행 제공자를 Mindlogic으로 확인하면, 원래 Codex 앱에서 그 대화를 다시 엽니다. 후속 요청의 실제 목적지가 `https://factchat-cloud.mindlogic.ai/v1/gateway/responses`인지 확인합니다. `codex-profile status`나 메뉴 표시만으로 완료를 판단하지 마세요.
+## 요청·인증 처리
 
-`mindlogic-thread`는 내장 app-server의 `thread/read`와 `thread/resume`만 사용하며 모델 요청을 보내지 않습니다. 대화가 아직 로드됐거나 현재 모델이 Mindlogic 목록에 없으면 오류로 중단합니다. 다른 app-server가 해당 대화를 쓰는 동안에도 Codex의 writer 잠금으로 중단됩니다. 오류가 나면 대상 대화에 시험 요청을 보내지 말고 원인을 해결한 뒤 다시 시도하세요. Mindlogic 실패 시 OpenAI로 자동 우회하지 않습니다.
+라우터는 `127.0.0.1:18762`에만 바인딩합니다. Codex가 보내는 별도 로컬 헤더 토큰을 검사하고, 알려진 모델 별칭 이외에는 HTTP 400으로 거절합니다. 사용자 설정과 라우터 매니페스트는 소유자 전용 권한으로 저장합니다.
 
-## 모델 범위
+| 메뉴 ID | 실제 모델 | 목적지 | 인증 |
+| --- | --- | --- | --- |
+| `gpt-6-sol` | `gpt-6-sol` | `chatgpt.com/backend-api/codex/responses` | 기존 ChatGPT bearer |
+| `mindlogic/gpt-6-sol` | `gpt-6-sol` | `factchat-cloud.mindlogic.ai/v1/gateway/responses` | 기존 `FACTCHAT_API_KEY` |
 
-스크립트가 인식하는 모델 ID는 `gpt-6-sol`, `gpt-6-luna`, `gpt-6-astra`, `gpt-5.6-sol`, `gpt-5.6-terra`, `gpt-5.6-luna`, `gpt-5.5`입니다. 이 중 본인 키의 목록에 있는 모델만 추가됩니다. 모델 목록에 있더라도 모든 Codex 도구 호출과의 호환성이 보장되지는 않습니다. 작성자의 계정에서는 `gpt-6-sol`의 Codex 도구 호출과 `gpt-6-luna`, `gpt-5.6-sol`의 간단한 Responses 요청을 확인했습니다. 다른 계정이나 버전은 직접 확인해야 합니다.
+OpenAI 인증 헤더는 Mindlogic에 전달하지 않습니다. 라우터는 SSE 데이터를 순서대로 전달하고 클라이언트가 취소하면 upstream 연결을 닫습니다. `store=false`를 유지하고 `previous_response_id`·`conversation` 같은 서버 종속 참조가 있으면 명시적으로 거절합니다. 제공자를 바꾸거나 라우터가 재시작된 첫 요청에서는 다른 제공자의 암호화된 reasoning 항목을 제외합니다. 보이는 대화 이력과 도구 호출·결과 항목은 유지합니다. 연결 실패 시 다른 제공자로 자동 우회하지 않습니다. 로그에는 별칭, 실제 모델, 목적지, 인증 **종류**, 요청 ID, HTTP 상태만 남기며 토큰과 본문을 기록하지 않습니다.
 
-## 추론 강도
+## 확인 결과 (2026-09-24)
 
-2026-09-24에 Mindlogic Gateway의 짧은 Responses 요청으로 확인한 결과, 위 GPT-6·GPT-5.6 모델은 `xhigh`와 `max`를 받아들였고 GPT-5.5는 `xhigh`를 받아들였습니다. GPT-5.5의 `max`와 GPT-6 Sol의 `ultra`는 HTTP 400으로 거절됐습니다. 따라서 설치 스크립트는 GPT-6·GPT-5.6에 `low`, `medium`, `high`, `xhigh`, `max`를, GPT-5.5에 `low`, `medium`, `high`, `xhigh`를 표시합니다. 기본값은 `medium`입니다.
+| 항목 | 결과 | 근거 |
+| --- | --- | --- |
+| 내장 `model/list` | PASS | OpenAI 7개와 Mindlogic 7개가 함께 반환됨 |
+| 설치된 CLI의 제공자 왕복 | PASS | `OpenAI → Mindlogic → OpenAI` 각 요청 HTTP 200, 라우터 목적지·인증 종류 기록 |
+| Mindlogic 모델 간 ID | PASS (CLI) | `gpt-6-sol`과 `gpt-6-luna`의 별칭·upstream 모델 ID 확인 |
+| Mindlogic 스트리밍 | PASS (CLI) | Responses SSE로 정상 응답 |
+| Mindlogic 도구 왕복 | PASS (CLI) | Gateway HTTP 200 두 번, `command_execution` 시작·완료와 `turn.completed` 확인 |
+| 기본 앱 메뉴 클릭·왕복 | NOT_RUN | 현재 자동화 환경에서 Codex 앱 자체의 모델 메뉴 조작이 허용되지 않음 |
+| 같은 대화의 제공자 전환 | PASS (임시 app-server) | 같은 threadId의 두 turn에서 Mindlogic → OpenAI 목적지·인증 종류 변경, 모두 HTTP 200 |
+| 지정된 기존 대화 재연결 | PASS (모델 요청 전) | 동일 threadId·이력·프로젝트 경로로 라우터 제공자를 저장; 앱 메뉴 클릭 검증은 별도 |
+| 무인증 로컬 요청 | PASS | HTTP 401 |
+| 복구 | PASS (모의) | 설치·반복 설치 거부·메뉴 선택 후 설정 복원 시험 통과 |
 
-[OpenAI 추론 문서](https://developers.openai.com/api/docs/guides/reasoning)는 모델별로 높은 단계를 안내하지만, [Mindlogic Responses 문서](https://docs.mindlogic.ai/docs/ynu-ac/api-gateway/reference/responses-api)는 `high`까지만 예시로 적고 있습니다. 위 범위는 작성자 계정의 실제 API 응답에 근거합니다. 다른 계정이나 Gateway 변경 후의 동작은 달라질 수 있습니다.
+`python3 -m unittest -v test_menu.py`는 TOML의 주석·따옴표 키·작은따옴표 문자열·여러 줄 문자열, 백업 이름, 설치·복구, 모의 제공자 분기·키 분리·SSE·도구 항목·오류를 검사합니다. CLI 결과는 기본 앱 메뉴 조작 성공을 대신하지 않습니다.
 
-**Claude 모델은 이 Codex 제공자에 추가하지 않습니다.** [OpenAI Codex 설정 문서](https://learn.chatgpt.com/docs/config-file/config-reference)의 사용자 지정 모델 제공자는 Responses 프로토콜을 사용하며, [Mindlogic 모델 문서](https://docs.mindlogic.ai/docs/general/api-gateway/getting-started/models)는 Claude에 Chat Completions 또는 Anthropic Messages 경로를 안내합니다. Claude를 쓰려면 해당 프로토콜을 지원하는 별도 클라이언트가 필요합니다.
+## 제거와 복구
 
-## 원상 복구
+```bash
+python3 setup.py menu-remove
+```
 
-설치 또는 전환 전에 생성된 `~/.codex/config.toml.backup-날짜` 파일 중 원하는 것을 `~/.codex/config.toml`로 복사하고 앱을 재시작하세요. `mindlogic-models.json`과 `mindlogic-profile.json`은 더 이상 필요 없으면 삭제할 수 있습니다. 스크립트가 새로 저장한 키는 `~/.codex/.env`에서 `FACTCHAT_API_KEY` 줄을 직접 제거할 수 있습니다.
+제거는 서비스와 이 작업이 만든 카탈로그·매니페스트를 지우고 설치 전 `config.toml`의 관련 키를 복원합니다. 설치 후 사용자가 다른 설정을 바꿨다면 그 내용은 유지합니다. 라우터 관련 설정을 다른 값으로 바꾼 경우 자동 덮어쓰기를 거부합니다. 제거 뒤 앱을 다시 열면 원래 메뉴가 반영됩니다. 원본 백업은 고유한 `.backup-<UUID>` 이름으로 남습니다. 이전 `codex-profile` 사용자가 수정한 파일은 설치·제거 과정에서 건드리지 않습니다.
 
-참고: [Mindlogic 모델 목록](https://docs.mindlogic.ai/docs/general/api-gateway/getting-started/models) · [OpenAI Codex 설정](https://learn.chatgpt.com/docs/config-file/config-reference)
+이전 `setup.py install/openai/mindlogic/mindlogic-thread` 명령은 기존 프로필 방식으로 남아 있습니다. 이 경로는 전역 설정을 바꾸므로 이번 **메뉴 선택만으로 전환**하는 사용법과 혼용하지 마세요.
