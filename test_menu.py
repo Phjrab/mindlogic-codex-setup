@@ -72,6 +72,25 @@ enabled = true
                 self.assertEqual(tomllib.loads(config.read_text())["model_provider"], "factchat")
                 self.assertFalse((root / "state.json").exists())
 
+    def test_failed_service_start_restores_config(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            config = root / "config.toml"
+            original = "model = 'gpt-6-sol'\nmodel_provider = 'openai'\n[other]\nvalue = 7\n"
+            config.write_text(original)
+            paths = {"HOME": root, "CONFIG": config, "CATALOG": root / "catalog.json",
+                     "MANIFEST": root / "routes.json", "STATE": root / "state.json",
+                     "ROUTER": root / "bin" / "router.py", "AGENT": root / "agent.plist"}
+            catalog = {"models": [{"slug": "gpt-6-sol"}, {"slug": "mindlogic/gpt-6-sol"}]}
+            routes = {"routes": {"gpt-6-sol": {"provider": "openai", "model": "gpt-6-sol"},
+                     "mindlogic/gpt-6-sol": {"provider": "mindlogic", "model": "gpt-6-sol"}}}
+            with patch.multiple(menu_install, **paths), patch.object(menu_install, "catalog_and_routes", return_value=(catalog, routes)), patch.object(menu_install, "launch"), patch.object(menu_install, "await_router_health", side_effect=RuntimeError("not ready")):
+                with self.assertRaises(RuntimeError):
+                    menu_install.install()
+                self.assertEqual(config.read_text(), original)
+                self.assertFalse((root / "state.json").exists())
+                self.assertFalse((root / "agent.plist").exists())
+
 
 class FakeResponse:
     status = 200
