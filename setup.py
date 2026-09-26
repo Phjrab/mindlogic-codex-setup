@@ -11,6 +11,7 @@ from pathlib import Path
 import re
 import select
 import shutil
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -41,9 +42,13 @@ def fail(message: str) -> None:
 
 
 def codex_executable() -> str:
-    candidates = ["/Applications/ChatGPT.app/Contents/Resources/codex", shutil.which("codex")]
+    candidates = [
+        str(Path(app) / "Contents/Resources" / relative)
+        for app in ("/Applications/ChatGPT.app", "/Applications/Codex.app")
+        for relative in ("codex-cli/bin/codex", "codex")
+    ] + [shutil.which("codex")]
     for candidate in candidates:
-        if candidate and Path(candidate).is_file():
+        if candidate and Path(candidate).is_file() and os.access(candidate, os.X_OK):
             return candidate
     fail("Codex CLI를 찾지 못했습니다. Codex 앱 또는 CLI를 먼저 설치하세요.")
 
@@ -88,11 +93,12 @@ def native_catalog() -> dict:
     with tempfile.TemporaryDirectory(prefix="mindlogic-codex-") as clean_home:
         env = dict(os.environ, CODEX_HOME=clean_home)
         result = subprocess.run(
-            [codex_executable(), "debug", "models"],
+            [codex_executable(), "debug", "models", "--bundled"],
             env=env,
             text=True,
             capture_output=True,
             check=False,
+            timeout=20,
         )
     if result.returncode:
         fail("Codex 모델 메타데이터를 읽지 못했습니다. 이 Codex 버전은 'codex debug models'가 필요합니다.")
@@ -288,10 +294,10 @@ class AppServer:
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,
-            text=True,
-            bufsize=1,
+            bufsize=0,
         )
         self.request_id = 0
+        self.read_buffer = b""
         try:
             self.call("initialize", {"clientInfo": {
                 "name": "mindlogic_codex_setup",
@@ -319,20 +325,26 @@ class AppServer:
         request = {"method": method, "params": params}
         if response:
             request["id"] = self.request_id
-        self.process.stdin.write(json.dumps(request) + "\n")
+        self.process.stdin.write((json.dumps(request) + "\n").encode())
         self.process.stdin.flush()
         if not response:
             return None
         deadline = time.monotonic() + 30
         while time.monotonic() < deadline:
-            ready, _, _ = select.select(
-                [self.process.stdout], [], [], max(0, deadline - time.monotonic())
-            )
-            if not ready:
-                break
-            line = self.process.stdout.readline()
-            if not line:
-                break
+            if b"\n" not in self.read_buffer:
+                ready, _, _ = select.select(
+                    [self.process.stdout], [], [], max(0, deadline - time.monotonic())
+                )
+                if not ready:
+                    break
+                chunk = os.read(self.process.stdout.fileno(), 65536)
+                if not chunk:
+                    break
+                self.read_buffer += chunk
+                continue
+            line, self.read_buffer = self.read_buffer.split(b"\n", 1)
+            if not line.strip():
+                continue
             reply = json.loads(line)
             if reply.get("id") != self.request_id:
                 continue
@@ -343,7 +355,7 @@ class AppServer:
         fail(f"Codex {method} 응답을 30초 안에 받지 못했습니다.")
 
 
-def switch_existing_thread(thread_id: str) -> None:
+def switch_existing_thread(thread_id: str, *, preserve_archive: bool = False) -> None:
     """Persist Mindlogic on an already-unloaded thread, without a model turn."""
     try:
         if str(uuid.UUID(thread_id)) != thread_id:
@@ -358,6 +370,15 @@ def switch_existing_thread(thread_id: str) -> None:
         fail("Mindlogic 모델 목록이 없습니다. 먼저 설치를 완료하세요.")
     supported = {item["slug"] for item in json.loads(CATALOG.read_text())["models"]}
 
+    archived = False
+    if preserve_archive:
+        database = CODEX_HOME / "state_5.sqlite"
+        with sqlite3.connect(f"file:{database}?mode=ro", uri=True) as connection:
+            row = connection.execute("SELECT archived FROM threads WHERE id = ?", (thread_id,)).fetchone()
+        if row is None:
+            fail("대화를 찾지 못했습니다.")
+        archived = bool(row[0])
+
     with AppServer() as server:
         thread = server.call("thread/read", {"threadId": thread_id})["thread"]
         if thread["id"] != thread_id:
@@ -365,25 +386,36 @@ def switch_existing_thread(thread_id: str) -> None:
         if thread["status"]["type"] != "notLoaded":
             fail("대화가 아직 로드되어 있습니다. 앱에서 해당 대화를 보관한 뒤 다시 보관 해제하고, 다른 대화에서 이 명령을 실행하세요.")
         model = thread.get("model") or top_level_value(CONFIG.read_text(), "model")
+        if thread.get("modelProvider") == "mindlogic_menu_router" and isinstance(model, str):
+            for prefix in ("mindlogic/", "mindlogic--"):
+                if model.startswith(prefix):
+                    model = model.removeprefix(prefix)
+                    break
         if model not in supported:
             fail(f"대화 모델 {model!r}은 현재 Mindlogic 모델 목록에 없습니다. 모델을 바꾼 뒤 다시 시도하세요.")
         cwd = thread["cwd"]
         project_id = thread.get("projectId")
         source = thread.get("source")
-        resumed = server.call("thread/resume", {
-            "threadId": thread_id,
-            "modelProvider": "factchat",
-            "model": model,
-        })
-        if (resumed["thread"]["id"] != thread_id or
-                resumed["thread"]["modelProvider"] != "factchat" or
-                resumed["thread"].get("projectId") != project_id or
-                resumed["thread"].get("source") != source or
-                resumed["modelProvider"] != "factchat" or
-                resumed["model"] != model or Path(resumed["cwd"]).resolve() != Path(cwd).resolve()):
-            actual = {"threadId": resumed["thread"]["id"], "modelProvider": resumed["modelProvider"],
-                      "model": resumed["model"], "cwd": resumed["cwd"]}
-            fail(f"재개 결과가 예상과 다릅니다: {actual}. 요청을 보내지 마세요.")
+        if archived:
+            server.call("thread/unarchive", {"threadId": thread_id})
+        try:
+            resumed = server.call("thread/resume", {
+                "threadId": thread_id,
+                "modelProvider": "factchat",
+                "model": model,
+            })
+            if (resumed["thread"]["id"] != thread_id or
+                    resumed["thread"]["modelProvider"] != "factchat" or
+                    resumed["thread"].get("projectId") != project_id or
+                    resumed["thread"].get("source") != source or
+                    resumed["modelProvider"] != "factchat" or
+                    resumed["model"] != model or Path(resumed["cwd"]).resolve() != Path(cwd).resolve()):
+                actual = {"threadId": resumed["thread"]["id"], "modelProvider": resumed["modelProvider"],
+                          "model": resumed["model"], "cwd": resumed["cwd"]}
+                fail(f"재개 결과가 예상과 다릅니다: {actual}. 요청을 보내지 마세요.")
+        finally:
+            if archived:
+                server.call("thread/archive", {"threadId": thread_id})
 
     # A second process checks persisted state after the first writer exits.
     with AppServer() as server:
@@ -392,13 +424,122 @@ def switch_existing_thread(thread_id: str) -> None:
                 thread.get("model") != model or Path(thread["cwd"]).resolve() != Path(cwd).resolve() or
                 thread.get("projectId") != project_id or thread.get("source") != source):
             fail("Mindlogic 실행 제공자가 저장되지 않았습니다. 요청을 보내지 마세요.")
+    if archived:
+        with sqlite3.connect(f"file:{database}?mode=ro", uri=True) as connection:
+            row = connection.execute("SELECT archived FROM threads WHERE id = ?", (thread_id,)).fetchone()
+        if row is None or not row[0]:
+            fail("원래 보관 상태가 복구되지 않았습니다.")
     print(f"동일 대화 {thread_id}의 저장된 실행 제공자: Mindlogic ({model})")
     print("원래 Codex 앱에서 이 대화를 다시 열고, 후속 요청의 실제 목적지를 확인하세요.")
 
 
+def switch_thread_to_menu(thread_id: str) -> None:
+    """Reconnect an unloaded user chat to the picker router, preserving archive state."""
+    try:
+        if str(uuid.UUID(thread_id)) != thread_id:
+            raise ValueError("non-canonical UUID")
+    except ValueError:
+        fail("Use the exact canonical threadId")
+    menu_state = CODEX_HOME / "mindlogic-menu-state.json"
+    routes_file = CODEX_HOME / "mindlogic-menu-routes.json"
+    database = CODEX_HOME / "state_5.sqlite"
+    if (not menu_state.is_file() or not routes_file.is_file() or
+            top_level_value(CONFIG.read_text(), "model_provider") != "mindlogic_menu_router"):
+        fail("Activate the Mindlogic model menu first")
+    routes = json.loads(routes_file.read_text())["routes"]
+    with sqlite3.connect(f"file:{database}?mode=ro", uri=True) as connection:
+        row = connection.execute(
+            "SELECT model_provider, model, archived, thread_source FROM threads WHERE id = ?",
+            (thread_id,),
+        ).fetchone()
+    if row is None or row[3] != "user":
+        fail("Only an existing user chat can be reconnected")
+    provider, saved_model, archived, _source = row
+    if provider == "mindlogic_menu_router":
+        print("Thread already uses the Mindlogic model menu")
+        return
+    if provider not in ("openai", "factchat") or not isinstance(saved_model, str):
+        fail("This chat's provider or model is not supported by the menu")
+    alias = f"mindlogic--{saved_model}" if provider == "factchat" else saved_model
+    expected_route = "mindlogic" if provider == "factchat" else "openai"
+    if routes.get(alias, {}).get("provider") != expected_route:
+        fail("This chat's model is not in the installed menu catalog")
+
+    def turn_ids(server: AppServer) -> list[str]:
+        ids = []
+        cursor = None
+        for _ in range(1000):
+            params = {"threadId": thread_id, "limit": 100, "itemsView": "summary"}
+            if cursor is not None:
+                params["cursor"] = cursor
+            page = server.call("thread/turns/list", params)
+            ids.extend(turn["id"] for turn in page["data"])
+            next_cursor = page.get("nextCursor")
+            if next_cursor is None:
+                return ids
+            if next_cursor == cursor:
+                fail("Turn pagination did not advance")
+            cursor = next_cursor
+        fail("Chat has too many turn pages to verify safely")
+
+    with AppServer() as server:
+        thread = server.call("thread/read", {"threadId": thread_id})["thread"]
+        if thread["id"] != thread_id or thread["status"]["type"] != "notLoaded":
+            fail("Chat is still loaded by the app; retry after it is unloaded")
+        if thread.get("modelProvider") != provider or thread.get("model") != saved_model:
+            fail("Chat changed since the migration scan; retry")
+        cwd, project_id, source = thread["cwd"], thread.get("projectId"), thread.get("source")
+        original_turn_ids = turn_ids(server)
+        if archived:
+            server.call("thread/unarchive", {"threadId": thread_id})
+        try:
+            resumed = server.call("thread/resume", {
+                "threadId": thread_id, "modelProvider": "mindlogic_menu_router", "model": alias,
+                "excludeTurns": True,
+            })
+            after_resume = resumed["thread"]
+            checks = {
+                "id": after_resume["id"] == thread_id,
+                "provider": resumed["modelProvider"] == "mindlogic_menu_router",
+                "model": resumed["model"] == alias,
+                "cwd": Path(resumed["cwd"]).resolve() == Path(cwd).resolve(),
+                "project": after_resume.get("projectId") == project_id,
+                "source": after_resume.get("source") == source,
+            }
+            if not all(checks.values()):
+                fail("Chat verification failed: " + ", ".join(k for k, ok in checks.items() if not ok))
+        finally:
+            if archived:
+                server.call("thread/archive", {"threadId": thread_id})
+    with AppServer() as server:
+        after = server.call("thread/read", {"threadId": thread_id})["thread"]
+        if (after["id"] != thread_id or after.get("modelProvider") != "mindlogic_menu_router" or
+                after.get("model") != alias or
+                Path(after["cwd"]).resolve() != Path(cwd).resolve() or
+                after.get("projectId") != project_id or after.get("source") != source or
+                turn_ids(server) != original_turn_ids):
+            fail("Router provider was not persisted; do not send a prompt")
+    if archived:
+        with sqlite3.connect(f"file:{database}?mode=ro", uri=True) as connection:
+            state = connection.execute("SELECT archived FROM threads WHERE id = ?", (thread_id,)).fetchone()
+        if state is None or not state[0]:
+            fail("The chat's archived state was not restored")
+    print(f"Thread {thread_id} now uses the Mindlogic model menu ({alias})")
+
+
 def main() -> None:
     action = sys.argv[1] if len(sys.argv) >= 2 else None
-    if action == "install":
+    if action in ("menu-install", "menu-refresh", "menu-activate", "menu-auth-isolate", "menu-auth-chatgpt", "menu-status", "menu-remove"):
+        if len(sys.argv) != 2:
+            fail(f"Usage: python3 setup.py {action}")
+        import menu_install
+        menu_install.main(action)
+    elif action == "menu-thread" and len(sys.argv) == 3:
+        switch_thread_to_menu(sys.argv[2])
+    elif action == "menu-thread-mindlogic" and len(sys.argv) == 3:
+        import menu_install
+        menu_install.main(action, sys.argv[2])
+    elif action == "install":
         if len(sys.argv) != 2:
             fail("Usage: python3 setup.py install")
         install()
@@ -410,10 +551,12 @@ def main() -> None:
         if len(sys.argv) != 2:
             fail("Usage: python3 setup.py status")
         status()
-    elif action == "mindlogic-thread" and len(sys.argv) == 3:
-        switch_existing_thread(sys.argv[2])
+    elif action == "mindlogic-thread" and len(sys.argv) in (3, 4):
+        if len(sys.argv) == 4 and sys.argv[3] != "--preserve-archive":
+            fail("Usage: python3 setup.py mindlogic-thread THREAD_ID [--preserve-archive]")
+        switch_existing_thread(sys.argv[2], preserve_archive=len(sys.argv) == 4)
     else:
-        fail("Usage: python3 setup.py {install|openai|mindlogic|status|mindlogic-thread THREAD_ID}")
+        fail("Usage: python3 setup.py {install|openai|mindlogic|status|mindlogic-thread THREAD_ID|menu-install|menu-activate|menu-auth-chatgpt|menu-auth-isolate|menu-thread-mindlogic THREAD_ID}")
 
 
 if __name__ == "__main__":
