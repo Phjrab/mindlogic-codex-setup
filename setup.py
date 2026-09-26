@@ -42,9 +42,13 @@ def fail(message: str) -> None:
 
 
 def codex_executable() -> str:
-    candidates = ["/Applications/ChatGPT.app/Contents/Resources/codex", shutil.which("codex")]
+    candidates = [
+        str(Path(app) / "Contents/Resources" / relative)
+        for app in ("/Applications/ChatGPT.app", "/Applications/Codex.app")
+        for relative in ("codex-cli/bin/codex", "codex")
+    ] + [shutil.which("codex")]
     for candidate in candidates:
-        if candidate and Path(candidate).is_file():
+        if candidate and Path(candidate).is_file() and os.access(candidate, os.X_OK):
             return candidate
     fail("Codex CLI를 찾지 못했습니다. Codex 앱 또는 CLI를 먼저 설치하세요.")
 
@@ -290,10 +294,10 @@ class AppServer:
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,
-            text=True,
-            bufsize=1,
+            bufsize=0,
         )
         self.request_id = 0
+        self.read_buffer = b""
         try:
             self.call("initialize", {"clientInfo": {
                 "name": "mindlogic_codex_setup",
@@ -321,20 +325,26 @@ class AppServer:
         request = {"method": method, "params": params}
         if response:
             request["id"] = self.request_id
-        self.process.stdin.write(json.dumps(request) + "\n")
+        self.process.stdin.write((json.dumps(request) + "\n").encode())
         self.process.stdin.flush()
         if not response:
             return None
         deadline = time.monotonic() + 30
         while time.monotonic() < deadline:
-            ready, _, _ = select.select(
-                [self.process.stdout], [], [], max(0, deadline - time.monotonic())
-            )
-            if not ready:
-                break
-            line = self.process.stdout.readline()
-            if not line:
-                break
+            if b"\n" not in self.read_buffer:
+                ready, _, _ = select.select(
+                    [self.process.stdout], [], [], max(0, deadline - time.monotonic())
+                )
+                if not ready:
+                    break
+                chunk = os.read(self.process.stdout.fileno(), 65536)
+                if not chunk:
+                    break
+                self.read_buffer += chunk
+                continue
+            line, self.read_buffer = self.read_buffer.split(b"\n", 1)
+            if not line.strip():
+                continue
             reply = json.loads(line)
             if reply.get("id") != self.request_id:
                 continue
@@ -425,7 +435,7 @@ def switch_existing_thread(thread_id: str, *, preserve_archive: bool = False) ->
 
 def main() -> None:
     action = sys.argv[1] if len(sys.argv) >= 2 else None
-    if action in ("menu-install", "menu-refresh", "menu-activate", "menu-auth-isolate", "menu-status", "menu-remove"):
+    if action in ("menu-install", "menu-refresh", "menu-activate", "menu-auth-isolate", "menu-auth-chatgpt", "menu-status", "menu-remove"):
         if len(sys.argv) != 2:
             fail(f"Usage: python3 setup.py {action}")
         import menu_install
@@ -450,7 +460,7 @@ def main() -> None:
             fail("Usage: python3 setup.py mindlogic-thread THREAD_ID [--preserve-archive]")
         switch_existing_thread(sys.argv[2], preserve_archive=len(sys.argv) == 4)
     else:
-        fail("Usage: python3 setup.py {install|openai|mindlogic|status|mindlogic-thread THREAD_ID|menu-install|menu-activate|menu-thread-mindlogic THREAD_ID}")
+        fail("Usage: python3 setup.py {install|openai|mindlogic|status|mindlogic-thread THREAD_ID|menu-install|menu-activate|menu-auth-chatgpt|menu-auth-isolate|menu-thread-mindlogic THREAD_ID}")
 
 
 if __name__ == "__main__":

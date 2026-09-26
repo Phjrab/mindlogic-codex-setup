@@ -1,17 +1,63 @@
 import http.client
+import io
 import json
+import os
 from pathlib import Path
 import tempfile
 import threading
 import tomllib
 import unittest
 from unittest.mock import patch
+from types import SimpleNamespace
 
 import menu_install
 import menu_router
+import setup
 
 
 class ConfigTests(unittest.TestCase):
+    def test_refresh_inactive_stale_catalog_preserves_selected_provider(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            paths = {name: root / name for name in ("CONFIG", "STATE", "CATALOG", "MANIFEST", "ROUTER")}
+            original = 'model = "gpt-6-sol"\nmodel_provider = "openai"\n'
+            paths["CONFIG"].write_text(original)
+            paths["STATE"].write_text('{}')
+            paths["CATALOG"].write_text('{"models":[]}')
+            paths["MANIFEST"].write_text('{"local_token":"test-token","routes":{}}')
+            paths["ROUTER"].write_text('# old router')
+            catalog = {"models": [{"slug": "mindlogic--gpt-6-sol"}]}
+            manifest = {"routes": {"mindlogic--gpt-6-sol": {"provider": "mindlogic", "model": "gpt-6-sol"}}}
+            with patch.multiple(menu_install, **paths), \
+                    patch.object(menu_install, "catalog_and_routes", return_value=(catalog, manifest)), \
+                    patch.object(menu_install, "launch"), patch.object(menu_install, "await_router_health"):
+                menu_install.refresh()
+            self.assertEqual(paths["CONFIG"].read_text(), original)
+            self.assertEqual(json.loads(paths["CATALOG"].read_text()), catalog)
+            self.assertEqual(json.loads(paths["MANIFEST"].read_text())["local_token"], "test-token")
+
+    def test_app_server_retains_coalesced_replies_after_notification(self):
+        read_fd, write_fd = os.pipe()
+        try:
+            os.write(write_fd, b'{"method":"notice"}\n{"id":1,"result":{"ok":1}}\n{"id":2,"result":{"ok":2}}\n')
+            with os.fdopen(read_fd, "rb", buffering=0) as output:
+                server = setup.AppServer()
+                server.process = SimpleNamespace(stdin=io.BytesIO(), stdout=output)
+                server.request_id = 0
+                server.read_buffer = b""
+                with patch.object(setup.select, "select", side_effect=[([output], [], [])]):
+                    self.assertEqual(server.call("first", {}), {"ok": 1})
+                    self.assertEqual(server.call("second", {}), {"ok": 2})
+        finally:
+            os.close(write_fd)
+
+    def test_current_app_cli_precedes_path_cli(self):
+        bundled = "/Applications/ChatGPT.app/Contents/Resources/codex-cli/bin/codex"
+        with patch.object(setup.shutil, "which", return_value="/usr/local/bin/codex"), \
+                patch.object(Path, "is_file", return_value=True), \
+                patch.object(setup.os, "access", return_value=True):
+            self.assertEqual(setup.codex_executable(), bundled)
+
     def test_menu_activation_restores_missing_provider_and_catalog(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -113,6 +159,17 @@ enabled = true
                 isolated = tomllib.loads(config.read_text())
                 self.assertEqual(isolated["model_provider"], "factchat")
                 self.assertFalse(isolated["model_providers"]["mindlogic_menu_router"]["requires_openai_auth"])
+                menu_install.isolate_local_auth()
+                before_auth = config.read_bytes()
+                with patch.object(menu_install, "await_router_health", side_effect=RuntimeError("unhealthy")):
+                    with self.assertRaises(RuntimeError):
+                        menu_install.enable_chatgpt_auth()
+                self.assertEqual(config.read_bytes(), before_auth)
+                menu_install.enable_chatgpt_auth()
+                enabled = tomllib.loads(config.read_text())
+                self.assertTrue(enabled["model_providers"]["mindlogic_menu_router"]["requires_openai_auth"])
+                self.assertEqual(enabled["model_provider"], "factchat")
+                menu_install.enable_chatgpt_auth()
                 menu_install.isolate_local_auth()
                 config.write_text(config.read_text().replace('model_provider = "factchat"',
                                                              'model_provider = "mindlogic_menu_router"', 1))

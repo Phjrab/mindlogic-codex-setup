@@ -299,9 +299,7 @@ def refresh() -> None:
     catalog, manifest = catalog_and_routes()
     manifest["local_token"] = json.loads(MANIFEST.read_text())["local_token"]
     current = tomllib.loads(CONFIG.read_text())
-    if current.get("model_provider") != PROVIDER:
-        raise ValueError("Menu router is not the active provider")
-    if current.get("model") not in manifest["routes"]:
+    if current.get("model_provider") == PROVIDER and current.get("model") not in manifest["routes"]:
         raise ValueError("Current picker model is no longer available; choose a supported model before refreshing")
     originals = {path: path.read_bytes() for path in (CATALOG, MANIFEST, ROUTER)}
     for path in originals:
@@ -321,6 +319,15 @@ def refresh() -> None:
 
 
 def isolate_local_auth() -> None:
+    set_chatgpt_auth(False)
+
+
+def enable_chatgpt_auth() -> None:
+    """Let the supported Codex auth layer supply and refresh ChatGPT credentials."""
+    set_chatgpt_auth(True)
+
+
+def set_chatgpt_auth(enabled: bool) -> None:
     """Update the installed local provider without changing the selected provider or model."""
     if not STATE.is_file() or not ROUTER.is_file():
         raise ValueError("Menu router is not installed")
@@ -329,11 +336,13 @@ def isolate_local_auth() -> None:
     old_section = state["provider_section"]
     if source.count(old_section) != 1:
         raise ValueError("Installed router provider settings changed; refusing to overwrite them")
-    new_section = old_section.replace("requires_openai_auth = true\n",
-                                      "requires_openai_auth = false\n")
+    desired = str(enabled).lower()
+    previous = str(not enabled).lower()
+    new_section = old_section.replace(f"requires_openai_auth = {previous}\n",
+                                      f"requires_openai_auth = {desired}\n")
     if new_section == old_section:
-        if "requires_openai_auth = false\n" in old_section:
-            print("Local router authentication is already isolated")
+        if f"requires_openai_auth = {desired}\n" in old_section:
+            print(f"Router ChatGPT authentication is already {desired}")
             return
         raise ValueError("Installed router authentication setting is unrecognized")
     updated = source.replace(old_section, new_section, 1)
@@ -354,7 +363,7 @@ def isolate_local_auth() -> None:
             atomic_bytes(path, data, 0o700 if path == ROUTER else 0o600)
         launch("kickstart")
         raise
-    print("Installed local-only router authentication; selected provider and model were preserved")
+    print(f"Router ChatGPT authentication: {desired}; selected provider and model were preserved")
 
 
 def activate() -> None:
@@ -375,7 +384,7 @@ def activate() -> None:
         for prefix in ("mindlogic/", "mindlogic--"):
             if current_model.startswith(prefix):
                 candidates.insert(0, mindlogic_alias(current_model.removeprefix(prefix)))
-        if current_model in routes and routes[current_model].get("provider") == "openai":
+        if mindlogic_alias(current_model) in routes:
             candidates.insert(0, mindlogic_alias(current_model))
         candidates.append(current_model)
     selected = next((candidate for candidate in candidates
@@ -528,7 +537,8 @@ def main(action: str, thread_id: str | None = None) -> None:
             (switch_thread_to_mindlogic if action == "menu-thread-mindlogic" else switch_thread)(thread_id)
         else:
             {"menu-install": install, "menu-refresh": refresh, "menu-activate": activate,
-             "menu-auth-isolate": isolate_local_auth, "menu-status": status,
+             "menu-auth-isolate": isolate_local_auth, "menu-auth-chatgpt": enable_chatgpt_auth,
+             "menu-status": status,
              "menu-remove": remove}[action]()
     except (ValueError, RuntimeError, OSError, tomllib.TOMLDecodeError) as error:
         setup.fail(str(error))

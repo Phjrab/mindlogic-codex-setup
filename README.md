@@ -1,5 +1,31 @@
 # Codex 기본 모델 메뉴에서 OpenAI·Mindlogic 선택
 
+## 현재 후보 — 2026-09-26
+
+**실제 앱 메뉴 검증 대기입니다.** 아래 9월 24일 결과와 현재 후보를 구분하세요.
+
+- 확인 환경: macOS 앱 26.924.22138 (11645), 내장 CLI 0.158.0-alpha.2.1.
+- 새 앱의 `codex-cli/bin/codex` 경로를 우선 사용하며 이전 앱 경로와 PATH CLI도 지원합니다.
+- 기본 모델 메뉴용 별칭은 `mindlogic--...`입니다. 최신 계정 모델 목록과 현재 내장 메타데이터로 카탈로그를 갱신합니다.
+- `menu-auth-chatgpt`는 `requires_openai_auth = true`로 설정합니다. Codex의 기존 로그인 계층이 ChatGPT 인증을 공급·갱신하고, 라우터는 OpenAI 요청에만 전달합니다. Mindlogic 요청에는 기존 `FACTCHAT_API_KEY`만 사용합니다. 인증 파일을 직접 읽거나 복제하지 않습니다.
+- 내장 app-server의 **동일 임시 대화**에서 `gpt-6-luna → mindlogic--gpt-6-luna → gpt-6-luna`를 실제 호출해 세 요청 모두 HTTP 200과 `turn/completed`를 확인했습니다. 앱 메뉴 클릭 검증을 대신하지 않습니다.
+- `menu-auth-isolate`는 이전처럼 ChatGPT 인증 공급을 끕니다. 이 모드에서는 별도 Bearer 없는 OpenAI 경로가 503으로 중단되므로 양쪽 메뉴를 함께 사용할 때 적용하지 마세요.
+- 양쪽 메뉴 후보는 ChatGPT 로그인이 필요합니다. 로그아웃 상태 및 OpenAI 사용량 소진 상태의 앱 입력은 아직 검증하지 않았습니다. 공급자의 사용 한도를 변경하지 않습니다.
+
+기존 설치를 현재 후보로 전환하는 명령:
+
+```bash
+python3 setup.py menu-refresh
+python3 setup.py menu-auth-chatgpt
+python3 setup.py menu-activate
+```
+
+초기 설치는 `menu-install` 후 `menu-auth-chatgpt`를 실행합니다. 카탈로그와 기본 제공자를 반영하려면 앱을 완전히 종료하고 다시 열어야 할 수 있습니다. 재시작은 사용자가 수행합니다. 이후 **새 채팅**에서 `Mindlogic · GPT-6 Luna`를 선택해 전송한 다음, 같은 채팅에서 `GPT-6 Luna`로 변경해 다시 전송하고 목적지 로그를 확인합니다. 이미 OpenAI/factchat 제공자로 만들어진 기존 채팅은 초기 한 번의 `menu-thread` 재연결이 별도로 필요합니다. 채팅의 저장된 provider 값은 라우터로 유지되고, 메뉴 선택으로 실제 API 목적지와 인증이 바뀌는 구조입니다.
+
+app-server JSON 응답 수신부도 수정했습니다. 알림과 여러 응답이 한 번에 도착했을 때 버퍼에 남은 응답을 놓쳐 타임아웃이 발생하지 않도록 바이트 버퍼를 유지합니다. 모의 회귀 테스트에는 인증 모드 양방향 전환, 서비스 실패 시 복원, 새 CLI 경로 선택, 응답 병합 수신이 포함됩니다.
+
+## 이전 작업 기록 — 2026-09-24
+
 macOS ChatGPT/Codex 앱의 **기존 모델 선택 메뉴**에 OpenAI 모델과 `Mindlogic · ...` 모델을 함께 표시하는 로컬 구성입니다. 다만 **기본 앱에서 한도 초과 상태의 메뉴 전환은 아직 동작하지 않습니다.** OpenAI 사용량이 소진된 계정에서 Mindlogic 항목을 선택해도 앱이 입력을 막는 사례가 확인됐습니다. 메뉴 표시만으로 Mindlogic 요청이 전송됐다고 판단하지 마세요. OpenAI API 키 과금 방식으로 바꾸지 않습니다.
 
 ## 검증 환경과 구현 이유
