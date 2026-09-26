@@ -145,15 +145,10 @@ enabled = true
                 menu_install.install()
                 installed = tomllib.loads(config.read_text())
                 self.assertEqual(installed["model"], "mindlogic--gpt-6-sol")
-                self.assertFalse(installed["model_providers"]["mindlogic_menu_router"]["requires_openai_auth"])
+                self.assertTrue(installed["model_providers"]["mindlogic_menu_router"]["requires_openai_auth"])
                 self.assertIn("X-Mindlogic-Router-Token",
                               installed["model_providers"]["mindlogic_menu_router"]["http_headers"])
-                state = json.loads(paths["STATE"].read_text())
-                state["provider_section"] = state["provider_section"].replace(
-                    "requires_openai_auth = false\n", "requires_openai_auth = true\n")
-                paths["STATE"].write_text(json.dumps(state))
-                config.write_text(config.read_text().replace("requires_openai_auth = false\n",
-                                                             "requires_openai_auth = true\n").replace(
+                config.write_text(config.read_text().replace(
                     'model_provider = "mindlogic_menu_router"', 'model_provider = "factchat"', 1))
                 menu_install.isolate_local_auth()
                 isolated = tomllib.loads(config.read_text())

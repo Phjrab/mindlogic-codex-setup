@@ -248,7 +248,7 @@ def install() -> None:
             x for x in manifest["routes"] if x.startswith("mindlogic--"))
     section = (f'[model_providers.{PROVIDER}]\nname = "Codex model menu router"\n'
                f'base_url = "http://127.0.0.1:{PORT}"\nwire_api = "responses"\n'
-               f'requires_openai_auth = false\nhttp_headers = {{ X-Mindlogic-Router-Token = "{manifest["local_token"]}" }}\n')
+               f'requires_openai_auth = true\nhttp_headers = {{ X-Mindlogic-Router-Token = "{manifest["local_token"]}" }}\n')
     values = {"model": selected, "model_provider": PROVIDER, "model_catalog_json": str(CATALOG)}
     updated = edit_config(source, values, provider_section=section)
     state = {"original_keys": top_level_lines(source), "original_values": {key: parsed.get(key) for key in MANAGED_KEYS},
@@ -289,8 +289,7 @@ def install() -> None:
         raise
     print(f"Installed: {len(catalog['models'])} picker models, {len(manifest['routes'])} routes")
     print("First application may require reopening the Codex app.")
-    print("Local authentication is isolated; verify Mindlogic input in the desktop app.")
-    print("OpenAI picker routes require a separately supported subscription credential source.")
+    print("ChatGPT login authenticates OpenAI routes; Mindlogic uses FACTCHAT_API_KEY.")
 
 
 def refresh() -> None:
