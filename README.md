@@ -2,13 +2,13 @@
 
 ## 현재 후보 — 2026-09-26
 
-**실제 앱 메뉴 검증 대기입니다.** 아래 9월 24일 결과와 현재 후보를 구분하세요.
+**재시작 후 앱 메뉴의 공급자 분기를 확인했습니다.** 사용자가 같은 채팅에서 Mindlogic 선택 시 사용량 소진 메시지, GPT-6 Luna로 변경 시 정상 응답을 확인했습니다. 라우터 로그도 `mindlogic--gpt-6-luna → Mindlogic Gateway HTTP 402`, `gpt-6-luna → OpenAI HTTP 200` 순서를 보여줍니다. Mindlogic의 정상 응답은 잔액 복구 후 앱에서 추가 확인해야 합니다. 아래 9월 24일 결과와 현재 결과를 구분하세요.
 
 - 확인 환경: macOS 앱 26.924.22138 (11645), 내장 CLI 0.158.0-alpha.2.1.
 - 새 앱의 `codex-cli/bin/codex` 경로를 우선 사용하며 이전 앱 경로와 PATH CLI도 지원합니다.
 - 기본 모델 메뉴용 별칭은 `mindlogic--...`입니다. 최신 계정 모델 목록과 현재 내장 메타데이터로 카탈로그를 갱신합니다.
 - `menu-auth-chatgpt`는 `requires_openai_auth = true`로 설정합니다. Codex의 기존 로그인 계층이 ChatGPT 인증을 공급·갱신하고, 라우터는 OpenAI 요청에만 전달합니다. Mindlogic 요청에는 기존 `FACTCHAT_API_KEY`만 사용합니다. 인증 파일을 직접 읽거나 복제하지 않습니다.
-- 내장 app-server의 **동일 임시 대화**에서 `gpt-6-luna → mindlogic--gpt-6-luna → gpt-6-luna`를 실제 호출해 세 요청 모두 HTTP 200과 `turn/completed`를 확인했습니다. 앱 메뉴 클릭 검증을 대신하지 않습니다.
+- 내장 app-server의 **동일 임시 대화**에서 `gpt-6-luna → mindlogic--gpt-6-luna → gpt-6-luna`를 실제 호출해 세 요청 모두 HTTP 200과 `turn/completed`를 확인했습니다. 이후 앱 메뉴 검증에서는 Mindlogic 402와 OpenAI 200을 확인했습니다.
 - `menu-auth-isolate`는 이전처럼 ChatGPT 인증 공급을 끕니다. 이 모드에서는 별도 Bearer 없는 OpenAI 경로가 503으로 중단되므로 양쪽 메뉴를 함께 사용할 때 적용하지 마세요.
 - 양쪽 메뉴 후보는 ChatGPT 로그인이 필요합니다. 로그아웃 상태 및 OpenAI 사용량 소진 상태의 앱 입력은 아직 검증하지 않았습니다. 공급자의 사용 한도를 변경하지 않습니다.
 
