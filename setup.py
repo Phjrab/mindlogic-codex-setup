@@ -433,6 +433,100 @@ def switch_existing_thread(thread_id: str, *, preserve_archive: bool = False) ->
     print("원래 Codex 앱에서 이 대화를 다시 열고, 후속 요청의 실제 목적지를 확인하세요.")
 
 
+def switch_thread_to_menu(thread_id: str) -> None:
+    """Reconnect an unloaded user chat to the picker router, preserving archive state."""
+    try:
+        if str(uuid.UUID(thread_id)) != thread_id:
+            raise ValueError("non-canonical UUID")
+    except ValueError:
+        fail("Use the exact canonical threadId")
+    menu_state = CODEX_HOME / "mindlogic-menu-state.json"
+    routes_file = CODEX_HOME / "mindlogic-menu-routes.json"
+    database = CODEX_HOME / "state_5.sqlite"
+    if (not menu_state.is_file() or not routes_file.is_file() or
+            top_level_value(CONFIG.read_text(), "model_provider") != "mindlogic_menu_router"):
+        fail("Activate the Mindlogic model menu first")
+    routes = json.loads(routes_file.read_text())["routes"]
+    with sqlite3.connect(f"file:{database}?mode=ro", uri=True) as connection:
+        row = connection.execute(
+            "SELECT model_provider, model, archived, thread_source FROM threads WHERE id = ?",
+            (thread_id,),
+        ).fetchone()
+    if row is None or row[3] != "user":
+        fail("Only an existing user chat can be reconnected")
+    provider, saved_model, archived, _source = row
+    if provider == "mindlogic_menu_router":
+        print("Thread already uses the Mindlogic model menu")
+        return
+    if provider not in ("openai", "factchat") or not isinstance(saved_model, str):
+        fail("This chat's provider or model is not supported by the menu")
+    alias = f"mindlogic--{saved_model}" if provider == "factchat" else saved_model
+    expected_route = "mindlogic" if provider == "factchat" else "openai"
+    if routes.get(alias, {}).get("provider") != expected_route:
+        fail("This chat's model is not in the installed menu catalog")
+
+    def turn_ids(server: AppServer) -> list[str]:
+        ids = []
+        cursor = None
+        for _ in range(1000):
+            params = {"threadId": thread_id, "limit": 100, "itemsView": "summary"}
+            if cursor is not None:
+                params["cursor"] = cursor
+            page = server.call("thread/turns/list", params)
+            ids.extend(turn["id"] for turn in page["data"])
+            next_cursor = page.get("nextCursor")
+            if next_cursor is None:
+                return ids
+            if next_cursor == cursor:
+                fail("Turn pagination did not advance")
+            cursor = next_cursor
+        fail("Chat has too many turn pages to verify safely")
+
+    with AppServer() as server:
+        thread = server.call("thread/read", {"threadId": thread_id})["thread"]
+        if thread["id"] != thread_id or thread["status"]["type"] != "notLoaded":
+            fail("Chat is still loaded by the app; retry after it is unloaded")
+        if thread.get("modelProvider") != provider or thread.get("model") != saved_model:
+            fail("Chat changed since the migration scan; retry")
+        cwd, project_id, source = thread["cwd"], thread.get("projectId"), thread.get("source")
+        original_turn_ids = turn_ids(server)
+        if archived:
+            server.call("thread/unarchive", {"threadId": thread_id})
+        try:
+            resumed = server.call("thread/resume", {
+                "threadId": thread_id, "modelProvider": "mindlogic_menu_router", "model": alias,
+                "excludeTurns": True,
+            })
+            after_resume = resumed["thread"]
+            checks = {
+                "id": after_resume["id"] == thread_id,
+                "provider": resumed["modelProvider"] == "mindlogic_menu_router",
+                "model": resumed["model"] == alias,
+                "cwd": Path(resumed["cwd"]).resolve() == Path(cwd).resolve(),
+                "project": after_resume.get("projectId") == project_id,
+                "source": after_resume.get("source") == source,
+            }
+            if not all(checks.values()):
+                fail("Chat verification failed: " + ", ".join(k for k, ok in checks.items() if not ok))
+        finally:
+            if archived:
+                server.call("thread/archive", {"threadId": thread_id})
+    with AppServer() as server:
+        after = server.call("thread/read", {"threadId": thread_id})["thread"]
+        if (after["id"] != thread_id or after.get("modelProvider") != "mindlogic_menu_router" or
+                after.get("model") != alias or
+                Path(after["cwd"]).resolve() != Path(cwd).resolve() or
+                after.get("projectId") != project_id or after.get("source") != source or
+                turn_ids(server) != original_turn_ids):
+            fail("Router provider was not persisted; do not send a prompt")
+    if archived:
+        with sqlite3.connect(f"file:{database}?mode=ro", uri=True) as connection:
+            state = connection.execute("SELECT archived FROM threads WHERE id = ?", (thread_id,)).fetchone()
+        if state is None or not state[0]:
+            fail("The chat's archived state was not restored")
+    print(f"Thread {thread_id} now uses the Mindlogic model menu ({alias})")
+
+
 def main() -> None:
     action = sys.argv[1] if len(sys.argv) >= 2 else None
     if action in ("menu-install", "menu-refresh", "menu-activate", "menu-auth-isolate", "menu-auth-chatgpt", "menu-status", "menu-remove"):
@@ -440,7 +534,9 @@ def main() -> None:
             fail(f"Usage: python3 setup.py {action}")
         import menu_install
         menu_install.main(action)
-    elif action in ("menu-thread", "menu-thread-mindlogic") and len(sys.argv) == 3:
+    elif action == "menu-thread" and len(sys.argv) == 3:
+        switch_thread_to_menu(sys.argv[2])
+    elif action == "menu-thread-mindlogic" and len(sys.argv) == 3:
         import menu_install
         menu_install.main(action, sys.argv[2])
     elif action == "install":

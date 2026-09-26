@@ -7,6 +7,7 @@ import tempfile
 import threading
 import tomllib
 import unittest
+import sqlite3
 from unittest.mock import patch
 from types import SimpleNamespace
 
@@ -16,6 +17,70 @@ import setup
 
 
 class ConfigTests(unittest.TestCase):
+    def test_mindlogic_astra_precedes_sol_in_new_catalog(self):
+        with tempfile.TemporaryDirectory() as temp:
+            home = Path(temp)
+            models = [{"slug": slug, "supported_reasoning_levels": [{"effort": "medium"}]}
+                      for slug in ("gpt-6-sol", "gpt-6-luna", "gpt-6-astra")]
+            (home / "models_cache.json").write_text(json.dumps({"models": models}))
+            with patch.object(menu_install, "HOME", home), \
+                    patch.object(menu_install, "read_mindlogic_key", return_value="test-key"), \
+                    patch.object(setup, "account_models", return_value={m["slug"] for m in models}), \
+                    patch.object(setup, "native_catalog", return_value={"models": models}):
+                catalog, _routes = menu_install.catalog_and_routes()
+            entries = [item for item in catalog["models"] if item["slug"].startswith("mindlogic--")]
+            self.assertEqual([item["slug"] for item in entries], [
+                "mindlogic--gpt-6-astra", "mindlogic--gpt-6-sol", "mindlogic--gpt-6-luna",
+            ])
+            self.assertEqual([item["priority"] for item in entries], [100, 101, 102])
+
+    def test_migrates_archived_user_chat_and_preserves_history(self):
+        with tempfile.TemporaryDirectory() as temp:
+            home = Path(temp)
+            thread_id = "01a0dce7-de52-7633-8040-e235c98474b5"
+            (home / "config.toml").write_text('model_provider = "mindlogic_menu_router"\n')
+            (home / "mindlogic-menu-state.json").write_text('{}')
+            (home / "mindlogic-menu-routes.json").write_text(json.dumps({"routes": {
+                "mindlogic--gpt-6-astra": {"provider": "mindlogic", "model": "gpt-6-astra"},
+            }}))
+            with sqlite3.connect(home / "state_5.sqlite") as database:
+                database.execute("CREATE TABLE threads (id TEXT, model_provider TEXT, model TEXT, "
+                                 "archived INTEGER, thread_source TEXT)")
+                database.execute("INSERT INTO threads VALUES (?,?,?,?,?)",
+                                 (thread_id, "factchat", "gpt-6-astra", 1, "user"))
+            state = {"id": thread_id, "status": {"type": "notLoaded"},
+                     "modelProvider": "factchat", "model": "gpt-6-astra", "cwd": str(home),
+                     "projectId": "project-1", "source": {"kind": "user"},
+                     "turns": [{"id": "one"}]}
+            calls = []
+            class FakeServer:
+                def __enter__(self): return self
+                def __exit__(self, *_args): pass
+                def call(self, method, params):
+                    calls.append(method)
+                    if method == "thread/read": return {"thread": dict(state)}
+                    if method == "thread/turns/list":
+                        return {"data": [{"id": "one"}], "nextCursor": None}
+                    if method == "thread/resume":
+                        self.testcase.assertTrue(params["excludeTurns"])
+                        state.update(modelProvider=params["modelProvider"], model=params["model"])
+                        return {"thread": dict(state), "modelProvider": state["modelProvider"],
+                                "model": state["model"], "cwd": state["cwd"]}
+                    if method in ("thread/unarchive", "thread/archive"):
+                        return {}
+                    raise AssertionError(method)
+            FakeServer.testcase = self
+            with patch.object(setup, "CODEX_HOME", home), \
+                    patch.object(setup, "CONFIG", home / "config.toml"), \
+                    patch.object(setup, "AppServer", FakeServer):
+                setup.switch_thread_to_menu(thread_id)
+            self.assertEqual(state["modelProvider"], "mindlogic_menu_router")
+            self.assertEqual(state["model"], "mindlogic--gpt-6-astra")
+            self.assertEqual(state["turns"], [{"id": "one"}])
+            self.assertEqual(calls, ["thread/read", "thread/turns/list", "thread/unarchive",
+                                     "thread/resume", "thread/archive", "thread/read",
+                                     "thread/turns/list"])
+
     def test_refresh_inactive_stale_catalog_preserves_selected_provider(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)

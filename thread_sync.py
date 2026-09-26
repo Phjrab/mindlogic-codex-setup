@@ -19,6 +19,7 @@ import tomllib
 HOME = Path(os.environ.get("CODEX_HOME", Path.home() / ".codex")).expanduser()
 CONFIG = HOME / "config.toml"
 CATALOG = HOME / "mindlogic-models.json"
+MENU_MANIFEST = HOME / "mindlogic-menu-routes.json"
 DB = HOME / "state_5.sqlite"
 SCRIPT = HOME / "bin" / "mindlogic-thread-sync.py"
 SWITCHER = HOME / "bin" / "mindlogic-thread-switch.py"
@@ -42,29 +43,41 @@ def atomic_copy(source: Path, target: Path, mode: int) -> None:
 
 
 def candidates() -> list[tuple[str, str, bool]]:
-    if not CONFIG.is_file() or not CATALOG.is_file() or not DB.is_file():
+    if not CONFIG.is_file() or not DB.is_file():
         return []
     config = tomllib.loads(CONFIG.read_text())
-    if config.get("model_provider") != "factchat":
+    provider_mode = config.get("model_provider")
+    if provider_mode == "factchat" and CATALOG.is_file():
+        available = {model["slug"] for model in json.loads(CATALOG.read_text())["models"]}
+        legacy_providers = ("openai", "mindlogic_menu_router")
+    elif provider_mode == "mindlogic_menu_router" and MENU_MANIFEST.is_file():
+        routes = json.loads(MENU_MANIFEST.read_text())["routes"]
+        legacy_providers = ("openai", "factchat")
+    else:
         return []
-    available = {model["slug"] for model in json.loads(CATALOG.read_text())["models"]}
     with sqlite3.connect(f"file:{DB}?mode=ro", uri=True) as database:
         rows = database.execute("""SELECT id, model_provider, model, archived FROM threads
             WHERE thread_source = 'user'
-              AND model_provider IN ('openai', 'mindlogic_menu_router')
-            ORDER BY updated_at DESC""").fetchall()
+              AND model_provider IN (?, ?)
+            ORDER BY updated_at DESC""", legacy_providers).fetchall()
     selected = []
     for thread_id, provider, model, archived in rows:
         if not isinstance(model, str):
             continue
-        direct_model = model
-        if provider == "mindlogic_menu_router":
-            for prefix in ("mindlogic/", "mindlogic--"):
-                if model.startswith(prefix):
-                    direct_model = model.removeprefix(prefix)
-                    break
-        if direct_model in available:
-            selected.append((thread_id, direct_model, bool(archived)))
+        if provider_mode == "factchat":
+            direct_model = model
+            if provider == "mindlogic_menu_router":
+                for prefix in ("mindlogic/", "mindlogic--"):
+                    if model.startswith(prefix):
+                        direct_model = model.removeprefix(prefix)
+                        break
+            if direct_model in available:
+                selected.append((thread_id, direct_model, bool(archived)))
+        else:
+            alias = f"mindlogic--{model}" if provider == "factchat" else model
+            expected = "mindlogic" if provider == "factchat" else "openai"
+            if routes.get(alias, {}).get("provider") == expected:
+                selected.append((thread_id, alias, bool(archived)))
     return selected
 
 
@@ -76,12 +89,15 @@ def run_once() -> tuple[int, int, int]:
         except BlockingIOError:
             return (0, 0, 0)
         switched = locked = failed = 0
-        if not SWITCHER.is_file():
+        switcher = SWITCHER if SWITCHER.is_file() else Path(__file__).with_name("setup.py")
+        if not switcher.is_file():
             return (0, 0, 1)
+        router_mode = tomllib.loads(CONFIG.read_text()).get("model_provider") == "mindlogic_menu_router"
         for thread_id, _model, archived in candidates():
             try:
-                command = [sys.executable, str(SWITCHER), "mindlogic-thread", thread_id]
-                if archived:
+                command = [sys.executable, str(switcher),
+                           "menu-thread" if router_mode else "mindlogic-thread", thread_id]
+                if archived and not router_mode:
                     command.append("--preserve-archive")
                 result = subprocess.run(
                     command, text=True, capture_output=True, timeout=120, check=False,
@@ -91,7 +107,8 @@ def run_once() -> tuple[int, int, int]:
                 continue
             if result.returncode == 0:
                 switched += 1
-            elif "active writer" in result.stderr or "아직 로드" in result.stderr:
+            elif ("active writer" in result.stderr or "아직 로드" in result.stderr or
+                  "still loaded" in result.stderr):
                 locked += 1
             else:
                 failed += 1

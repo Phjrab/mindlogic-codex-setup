@@ -169,9 +169,13 @@ def catalog_and_routes() -> tuple[dict, dict]:
     routes = {item["slug"]: {"provider": "openai", "model": item["slug"]} for item in openai}
     mindlogic = []
     unsupported = []
-    for slug, name in setup.MODEL_NAMES.items():
+    ordered_slugs = ("gpt-6-astra", "gpt-6-sol", "gpt-6-luna") + tuple(
+        slug for slug in setup.MODEL_NAMES if slug not in ("gpt-6-astra", "gpt-6-sol", "gpt-6-luna")
+    )
+    for slug in ordered_slugs:
         if slug not in available:
             continue
+        name = setup.MODEL_NAMES[slug]
         template = templates.get(slug)
         if template is None:
             unsupported.append(slug)
@@ -457,39 +461,8 @@ def remove() -> None:
 
 
 def switch_thread(thread_id: str) -> None:
-    """One-time migration of an unloaded legacy thread to the fixed router provider."""
-    if str(uuid.UUID(thread_id)) != thread_id:
-        raise ValueError("Use the exact canonical threadId")
-    if not STATE.exists() or tomllib.loads(CONFIG.read_text()).get("model_provider") != PROVIDER:
-        raise ValueError("Install the menu router first")
-    routes = json.loads(MANIFEST.read_text())["routes"]
-    with setup.AppServer() as server:
-        thread = server.call("thread/read", {"threadId": thread_id})["thread"]
-        if thread["id"] != thread_id or thread["status"]["type"] != "notLoaded":
-            raise ValueError("Thread is still loaded; archive and unarchive only this idle thread first")
-        original_provider = thread.get("modelProvider")
-        original_model = thread.get("model")
-        if original_provider == PROVIDER:
-            print("Thread already uses the menu router")
-            return
-        alias = mindlogic_alias(original_model) if original_provider == "factchat" else original_model
-        if original_provider not in ("factchat", "openai") or alias not in routes:
-            raise ValueError("This thread's provider or model is not in the router catalog")
-        cwd, project_id, source = thread["cwd"], thread.get("projectId"), thread.get("source")
-        resumed = server.call("thread/resume", {"threadId": thread_id,
-            "modelProvider": PROVIDER, "model": alias})
-        if (resumed["thread"]["id"] != thread_id or resumed["modelProvider"] != PROVIDER
-            or resumed["model"] != alias or Path(resumed["cwd"]).resolve() != Path(cwd).resolve()
-            or resumed["thread"].get("projectId") != project_id
-            or resumed["thread"].get("source") != source):
-            raise ValueError("Resume did not preserve the original thread; do not send a prompt")
-    with setup.AppServer() as server:
-        after = server.call("thread/read", {"threadId": thread_id})["thread"]
-        if (after["id"] != thread_id or after["modelProvider"] != PROVIDER
-            or after.get("model") != alias or Path(after["cwd"]).resolve() != Path(cwd).resolve()
-            or after.get("projectId") != project_id or after.get("source") != source):
-            raise ValueError("Router provider was not persisted; do not send a prompt")
-    print(f"Thread {thread_id} now uses the menu router with {alias}")
+    """One-time migration of an unloaded user chat to the fixed router provider."""
+    setup.switch_thread_to_menu(thread_id)
 
 
 def switch_thread_to_mindlogic(thread_id: str) -> None:
