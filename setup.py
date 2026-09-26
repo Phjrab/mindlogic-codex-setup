@@ -9,10 +9,13 @@ import json
 import os
 from pathlib import Path
 import re
+import select
 import shutil
 import subprocess
 import sys
 import tempfile
+import time
+import uuid
 from datetime import datetime
 
 
@@ -265,7 +268,9 @@ def switch(target: str) -> None:
     backup(CONFIG)
     write_private(CONFIG, update_config(current, provider=provider, model=model, effort=effort, catalog=use_catalog))
     status()
-    print("새 Codex 채팅을 열어 적용하세요. 모델 메뉴가 갱신되지 않으면 앱을 재시작하세요.")
+    print("기본 설정만 변경했습니다. 이미 열린 대화의 실행 제공자는 유지될 수 있습니다.")
+    if target == "mindlogic":
+        print("기존 대화를 같은 ID로 전환하려면 README의 '기존 대화 전환' 절차를 따르세요.")
 
 
 def status() -> None:
@@ -274,16 +279,141 @@ def status() -> None:
     print("Model:", top_level_value(current, "model") or "Codex default")
 
 
+class AppServer:
+    """Short-lived app-server connection for thread metadata and resume only."""
+
+    def __enter__(self):
+        self.process = subprocess.Popen(
+            [codex_executable(), "app-server", "--stdio"],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            bufsize=1,
+        )
+        self.request_id = 0
+        try:
+            self.call("initialize", {"clientInfo": {
+                "name": "mindlogic_codex_setup",
+                "title": "Mindlogic Codex setup",
+                "version": "1.0",
+            }})
+            self.call("initialized", {}, response=False)
+        except BaseException:
+            self.__exit__()
+            raise
+        return self
+
+    def __exit__(self, *_exc):
+        if self.process.poll() is not None:
+            return
+        self.process.terminate()
+        try:
+            self.process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            self.process.kill()
+            self.process.wait(timeout=5)
+
+    def call(self, method: str, params: dict, *, response: bool = True) -> dict | None:
+        self.request_id += 1
+        request = {"method": method, "params": params}
+        if response:
+            request["id"] = self.request_id
+        self.process.stdin.write(json.dumps(request) + "\n")
+        self.process.stdin.flush()
+        if not response:
+            return None
+        deadline = time.monotonic() + 30
+        while time.monotonic() < deadline:
+            ready, _, _ = select.select(
+                [self.process.stdout], [], [], max(0, deadline - time.monotonic())
+            )
+            if not ready:
+                break
+            line = self.process.stdout.readline()
+            if not line:
+                break
+            reply = json.loads(line)
+            if reply.get("id") != self.request_id:
+                continue
+            if "error" in reply:
+                error = reply["error"]
+                fail(f"Codex {method} 실패 ({error.get('code')}): {error.get('message')}")
+            return reply["result"]
+        fail(f"Codex {method} 응답을 30초 안에 받지 못했습니다.")
+
+
+def switch_existing_thread(thread_id: str) -> None:
+    """Persist Mindlogic on an already-unloaded thread, without a model turn."""
+    try:
+        if str(uuid.UUID(thread_id)) != thread_id:
+            raise ValueError("non-canonical UUID")
+    except ValueError:
+        fail("정확한 Codex threadId(UUID)를 입력하세요.")
+    if not CONFIG.exists() or top_level_value(CONFIG.read_text(), "model_provider") != "factchat":
+        fail("먼저 'codex-profile mindlogic'으로 기본 제공자를 설정하세요.")
+    if not read_env_key():
+        fail("FACTCHAT_API_KEY가 없어 전환을 중단합니다.")
+    if not CATALOG.exists():
+        fail("Mindlogic 모델 목록이 없습니다. 먼저 설치를 완료하세요.")
+    supported = {item["slug"] for item in json.loads(CATALOG.read_text())["models"]}
+
+    with AppServer() as server:
+        thread = server.call("thread/read", {"threadId": thread_id})["thread"]
+        if thread["id"] != thread_id:
+            fail("요청한 대화와 조회된 대화 ID가 다릅니다.")
+        if thread["status"]["type"] != "notLoaded":
+            fail("대화가 아직 로드되어 있습니다. 앱에서 해당 대화를 보관한 뒤 다시 보관 해제하고, 다른 대화에서 이 명령을 실행하세요.")
+        model = thread.get("model") or top_level_value(CONFIG.read_text(), "model")
+        if model not in supported:
+            fail(f"대화 모델 {model!r}은 현재 Mindlogic 모델 목록에 없습니다. 모델을 바꾼 뒤 다시 시도하세요.")
+        cwd = thread["cwd"]
+        project_id = thread.get("projectId")
+        source = thread.get("source")
+        resumed = server.call("thread/resume", {
+            "threadId": thread_id,
+            "modelProvider": "factchat",
+            "model": model,
+        })
+        if (resumed["thread"]["id"] != thread_id or
+                resumed["thread"]["modelProvider"] != "factchat" or
+                resumed["thread"].get("projectId") != project_id or
+                resumed["thread"].get("source") != source or
+                resumed["modelProvider"] != "factchat" or
+                resumed["model"] != model or Path(resumed["cwd"]).resolve() != Path(cwd).resolve()):
+            actual = {"threadId": resumed["thread"]["id"], "modelProvider": resumed["modelProvider"],
+                      "model": resumed["model"], "cwd": resumed["cwd"]}
+            fail(f"재개 결과가 예상과 다릅니다: {actual}. 요청을 보내지 마세요.")
+
+    # A second process checks persisted state after the first writer exits.
+    with AppServer() as server:
+        thread = server.call("thread/read", {"threadId": thread_id})["thread"]
+        if (thread["id"] != thread_id or thread["modelProvider"] != "factchat" or
+                thread.get("model") != model or Path(thread["cwd"]).resolve() != Path(cwd).resolve() or
+                thread.get("projectId") != project_id or thread.get("source") != source):
+            fail("Mindlogic 실행 제공자가 저장되지 않았습니다. 요청을 보내지 마세요.")
+    print(f"동일 대화 {thread_id}의 저장된 실행 제공자: Mindlogic ({model})")
+    print("원래 Codex 앱에서 이 대화를 다시 열고, 후속 요청의 실제 목적지를 확인하세요.")
+
+
 def main() -> None:
-    action = sys.argv[1] if len(sys.argv) == 2 else None
+    action = sys.argv[1] if len(sys.argv) >= 2 else None
     if action == "install":
+        if len(sys.argv) != 2:
+            fail("Usage: python3 setup.py install")
         install()
     elif action in ("openai", "mindlogic"):
+        if len(sys.argv) != 2:
+            fail(f"Usage: python3 setup.py {action}")
         switch(action)
     elif action == "status":
+        if len(sys.argv) != 2:
+            fail("Usage: python3 setup.py status")
         status()
+    elif action == "mindlogic-thread" and len(sys.argv) == 3:
+        switch_existing_thread(sys.argv[2])
     else:
-        fail("Usage: python3 setup.py {install|openai|mindlogic|status}")
+        fail("Usage: python3 setup.py {install|openai|mindlogic|status|mindlogic-thread THREAD_ID}")
 
 
 if __name__ == "__main__":

@@ -16,7 +16,7 @@ cd mindlogic-codex-setup
 python3 setup.py install
 ```
 
-스크립트는 기존 `FACTCHAT_API_KEY` 환경변수 또는 `~/.codex/.env`를 사용합니다. 둘 다 없으면 키를 화면에 표시하지 않고 입력받아 `~/.codex/.env`에 저장합니다. **키를 GitHub, 명령 인수, 채팅에 붙여 넣지 마세요.** 설치 후 Codex 앱을 재시작하고 새 채팅에서 `Mindlogic`으로 시작하는 모델을 고르세요.
+스크립트는 기존 `FACTCHAT_API_KEY` 환경변수 또는 `~/.codex/.env`를 사용합니다. 둘 다 없으면 키를 화면에 표시하지 않고 입력받아 `~/.codex/.env`에 저장합니다. **키를 GitHub, 명령 인수, 채팅에 붙여 넣지 마세요.** 설치 후 Codex 앱을 재시작하고 새 채팅에서 `Mindlogic`으로 시작하는 모델을 고르세요. 이미 열린 대화의 전환은 아래 절차를 사용합니다.
 
 설치 과정은 다음과 같습니다.
 
@@ -33,7 +33,23 @@ python3 setup.py install
 ~/.codex/bin/codex-profile mindlogic
 ```
 
-`openai`는 설치 당시의 OpenAI 모델과 추론 강도를 복원합니다. 설치 당시 이미 다른 제공자를 사용 중이면 OpenAI 쪽 모델은 `gpt-6-astra`로 기록합니다. 전환 후 새 채팅을 여세요. 모델 메뉴가 그대로라면 앱을 재시작하세요. 원하는 Mindlogic 모델은 앱 모델 메뉴에서 고를 수 있습니다.
+`openai`는 설치 당시의 OpenAI 모델과 추론 강도를 복원합니다. 설치 당시 이미 다른 제공자를 사용 중이면 OpenAI 쪽 모델은 `gpt-6-astra`로 기록합니다. 이 명령은 **새 대화의 기본 설정**을 바꿉니다. 이미 열린 대화의 실행 제공자는 바꾸지 않습니다. 모델 메뉴 선택도 실행 제공자를 바꾸지 않을 수 있습니다. 새 대화의 모델 메뉴가 그대로라면 앱을 재시작하세요.
+
+## 기존 대화 전환
+
+Codex 앱 26.917.51856에 포함된 CLI 0.155.0-alpha.16에서는 로드된 대화에 `thread/resume`의 `modelProvider`를 전달해도 실행 제공자가 바뀌지 않았습니다. 같은 대화를 앱에서 언로드한 후 제공자를 명시해 재개하면 바뀌었습니다. 아래 절차는 **같은 threadId와 이력**을 유지하며, 앱 전체 재시작 없이 적용할 수 있습니다.
+
+1. 전환할 대화의 작업과 도구 실행이 끝났는지 확인합니다. 그 대화에 추가 시험 요청을 보내지 마세요.
+2. `codex-profile mindlogic`으로 기본 설정을 바꿉니다.
+3. **앱에서 대상 대화만 보관했다가 보관 해제**합니다. 대상 대화를 다시 열기 전, 다른 대화나 독립 터미널에서 아래 명령을 실행합니다. 보관·해제는 해당 대화의 실행 세션을 언로드하기 위한 작업입니다.
+
+   ```bash
+   python3 setup.py mindlogic-thread <기존-threadId>
+   ```
+
+4. 명령이 동일 ID의 저장된 실행 제공자를 Mindlogic으로 확인하면, 원래 Codex 앱에서 그 대화를 다시 엽니다. 후속 요청의 실제 목적지가 `https://factchat-cloud.mindlogic.ai/v1/gateway/responses`인지 확인합니다. `codex-profile status`나 메뉴 표시만으로 완료를 판단하지 마세요.
+
+`mindlogic-thread`는 내장 app-server의 `thread/read`와 `thread/resume`만 사용하며 모델 요청을 보내지 않습니다. 대화가 아직 로드됐거나 현재 모델이 Mindlogic 목록에 없으면 오류로 중단합니다. 다른 app-server가 해당 대화를 쓰는 동안에도 Codex의 writer 잠금으로 중단됩니다. 오류가 나면 대상 대화에 시험 요청을 보내지 말고 원인을 해결한 뒤 다시 시도하세요. Mindlogic 실패 시 OpenAI로 자동 우회하지 않습니다.
 
 ## 모델 범위
 
