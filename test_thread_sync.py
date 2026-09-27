@@ -9,6 +9,32 @@ import thread_sync
 
 
 class CandidateSafetyTests(unittest.TestCase):
+    def test_one_shot_replaces_only_unsupported_user_models(self):
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            config = home / "config.toml"
+            config.write_text('model_provider = "mindlogic_menu_router"\nmodel = "gpt-6-sol"\n')
+            manifest = home / "mindlogic-menu-routes.json"
+            manifest.write_text(json.dumps({"routes": {
+                "gpt-6-sol": {"provider": "openai", "model": "gpt-6-sol"},
+                "mindlogic--gpt-6-luna": {"provider": "mindlogic", "model": "gpt-6-luna"},
+            }}))
+            db = home / "state_5.sqlite"
+            with sqlite3.connect(db) as connection:
+                connection.execute("CREATE TABLE threads (id TEXT, model_provider TEXT, model TEXT, "
+                                   "archived INTEGER, thread_source TEXT, updated_at INTEGER)")
+                connection.executemany("INSERT INTO threads VALUES (?,?,?,?,?,?)", [
+                    ("old-openai", "openai", "gpt-5.3-codex-spark", 0, "user", 5),
+                    ("old-mindlogic", "factchat", "gpt-5.4", 1, "user", 4),
+                    ("supported", "openai", "gpt-6-sol", 0, "user", 3),
+                    ("internal", "openai", "gpt-5.3-codex-spark", 0, "subagent", 2),
+                ])
+            with patch.multiple(thread_sync, CONFIG=config, MENU_MANIFEST=manifest, DB=db):
+                self.assertEqual(thread_sync.replacement_candidates(), [
+                    ("old-openai", "gpt-5.3-codex-spark", "gpt-6-sol", False),
+                    ("old-mindlogic", "gpt-5.4", "mindlogic--gpt-6-luna", True),
+                ])
+
     def test_router_mode_selects_only_supported_user_chats(self):
         with tempfile.TemporaryDirectory() as directory:
             home = Path(directory)
@@ -108,6 +134,24 @@ class CandidateSafetyTests(unittest.TestCase):
                     ]), patch.object(thread_sync.subprocess, "run", return_value=Mock(returncode=0)) as run:
                 self.assertEqual(thread_sync.run_once(), (1, 0, 0))
             self.assertEqual(Path(run.call_args.args[0][1]).name, "setup.py")
+
+    def test_migrate_all_passes_validated_replacement_to_checkout(self):
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            config = home / "config.toml"
+            config.write_text('model_provider = "mindlogic_menu_router"\n')
+            installed = home / "installed-switcher.py"
+            installed.touch()
+            with patch.multiple(thread_sync, LOCK=home / "lock", SWITCHER=installed,
+                                CONFIG=config), \
+                    patch.object(thread_sync, "candidates", return_value=[]), \
+                    patch.object(thread_sync, "replacement_candidates", return_value=[
+                        ("old", "gpt-5.3-codex-spark", "gpt-6-sol", False),
+                    ]), patch.object(thread_sync.subprocess, "run", return_value=Mock(returncode=0)) as run:
+                self.assertEqual(thread_sync.run_once(include_unsupported=True), (1, 0, 0))
+            self.assertEqual(Path(run.call_args.args[0][1]).name, "setup.py")
+            self.assertEqual(run.call_args.args[0][-4:],
+                             ["menu-thread", "old", "--model", "gpt-6-sol"])
 
 
 if __name__ == "__main__":
