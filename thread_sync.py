@@ -81,22 +81,78 @@ def candidates() -> list[tuple[str, str, bool]]:
     return selected
 
 
-def run_once() -> tuple[int, int, int]:
+def replacement_candidates() -> list[tuple[str, str, str, bool]]:
+    """Find user chats whose old model is absent from the installed router menu."""
+    if not CONFIG.is_file() or not DB.is_file() or not MENU_MANIFEST.is_file():
+        return []
+    config = tomllib.loads(CONFIG.read_text())
+    if config.get("model_provider") != "mindlogic_menu_router":
+        return []
+    routes = json.loads(MENU_MANIFEST.read_text())["routes"]
+    configured = config.get("model")
+
+    def fallback(provider: str) -> str | None:
+        route_provider = "openai" if provider == "openai" else "mindlogic"
+        preferred = ([configured, "gpt-6-luna"] if provider == "openai" else
+                     [f"mindlogic--{configured}" if isinstance(configured, str) else None,
+                      "mindlogic--gpt-6-luna"])
+        selectable = []
+        for alias, route in routes.items():
+            if route.get("provider") != route_provider:
+                continue
+            if provider == "openai" and alias not in ("gpt-reserve", "codex-auto-review"):
+                selectable.append(alias)
+            elif provider == "factchat" and alias.startswith("mindlogic--"):
+                selectable.append(alias)
+        for alias in [*preferred, *selectable]:
+            if isinstance(alias, str) and alias in selectable:
+                return alias
+        return None
+
+    with sqlite3.connect(f"file:{DB}?mode=ro", uri=True) as database:
+        rows = database.execute("""SELECT id, model_provider, model, archived FROM threads
+            WHERE thread_source = 'user' AND model_provider IN ('openai', 'factchat')
+            ORDER BY updated_at DESC""").fetchall()
+    selected = []
+    for thread_id, provider, model, archived in rows:
+        if not isinstance(model, str):
+            continue
+        alias = f"mindlogic--{model}" if provider == "factchat" else model
+        expected = "mindlogic" if provider == "factchat" else "openai"
+        if routes.get(alias, {}).get("provider") == expected:
+            continue
+        replacement = fallback(provider)
+        if replacement is None:
+            raise RuntimeError(f"No {expected} menu model is available for chat {thread_id}")
+        selected.append((thread_id, model, replacement, bool(archived)))
+    return selected
+
+
+def run_once(include_unsupported: bool = False) -> tuple[int, int, int]:
     LOCK.parent.mkdir(parents=True, exist_ok=True)
     with LOCK.open("a+") as lock:
         try:
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
+            if include_unsupported:
+                raise RuntimeError("Another chat migration is running; retry in a moment")
             return (0, 0, 0)
         switched = locked = failed = 0
-        switcher = SWITCHER if SWITCHER.is_file() else Path(__file__).with_name("setup.py")
+        checkout_switcher = Path(__file__).with_name("setup.py")
+        switcher = checkout_switcher if include_unsupported or not SWITCHER.is_file() else SWITCHER
         if not switcher.is_file():
             return (0, 0, 1)
         router_mode = tomllib.loads(CONFIG.read_text()).get("model_provider") == "mindlogic_menu_router"
-        for thread_id, _model, archived in candidates():
+        normal = [(thread_id, model, archived, None) for thread_id, model, archived in candidates()]
+        replacements = replacement_candidates() if include_unsupported else []
+        work = normal + [(thread_id, old_model, archived, new_model)
+                         for thread_id, old_model, new_model, archived in replacements]
+        for thread_id, old_model, archived, new_model in work:
             try:
                 command = [sys.executable, str(switcher),
                            "menu-thread" if router_mode else "mindlogic-thread", thread_id]
+                if new_model is not None:
+                    command.extend(["--model", new_model])
                 if archived and not router_mode:
                     command.append("--preserve-archive")
                 result = subprocess.run(
@@ -104,14 +160,22 @@ def run_once() -> tuple[int, int, int]:
                 )
             except (OSError, subprocess.TimeoutExpired):
                 failed += 1
+                if include_unsupported:
+                    print(f"Chat {thread_id}: migration command failed or timed out")
                 continue
             if result.returncode == 0:
                 switched += 1
+                if new_model is not None:
+                    print(f"Chat {thread_id}: unsupported {old_model} -> {new_model}")
             elif ("active writer" in result.stderr or "아직 로드" in result.stderr or
                   "still loaded" in result.stderr):
                 locked += 1
+                if include_unsupported:
+                    print(f"Chat {thread_id}: still in use; close Codex and retry")
             else:
                 failed += 1
+                if include_unsupported:
+                    print(f"Chat {thread_id}: migration failed; try menu-thread for details")
         return (switched, locked, failed)
 
 
@@ -178,11 +242,11 @@ def main() -> None:
             install()
         elif action == "remove":
             remove()
-        elif action == "run":
-            switched, locked, failed = run_once()
+        elif action in ("run", "migrate-all"):
+            switched, locked, failed = run_once(include_unsupported=action == "migrate-all")
             print(f"Thread sync: switched={switched} waiting_for_writer={locked} errors={failed}")
         else:
-            raise RuntimeError("Usage: thread_sync.py [install|run|remove]")
+            raise RuntimeError("Usage: thread_sync.py [install|run|migrate-all|remove]")
     except (OSError, ValueError, RuntimeError, tomllib.TOMLDecodeError) as error:
         raise SystemExit(str(error)) from error
 

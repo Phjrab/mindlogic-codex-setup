@@ -433,7 +433,7 @@ def switch_existing_thread(thread_id: str, *, preserve_archive: bool = False) ->
     print("원래 Codex 앱에서 이 대화를 다시 열고, 후속 요청의 실제 목적지를 확인하세요.")
 
 
-def switch_thread_to_menu(thread_id: str) -> None:
+def switch_thread_to_menu(thread_id: str, model_override: str | None = None) -> None:
     """Reconnect an unloaded user chat to the picker router, preserving archive state."""
     try:
         if str(uuid.UUID(thread_id)) != thread_id:
@@ -461,6 +461,8 @@ def switch_thread_to_menu(thread_id: str) -> None:
     if provider not in ("openai", "factchat") or not isinstance(saved_model, str):
         fail("This chat's provider or model is not supported by the menu")
     alias = f"mindlogic--{saved_model}" if provider == "factchat" else saved_model
+    if model_override is not None:
+        alias = model_override
     expected_route = "mindlogic" if provider == "factchat" else "openai"
     if routes.get(alias, {}).get("provider") != expected_route:
         fail("This chat's model is not in the installed menu catalog")
@@ -534,8 +536,9 @@ def main() -> None:
             fail(f"Usage: python3 setup.py {action}")
         import menu_install
         menu_install.main(action)
-    elif action == "menu-thread" and len(sys.argv) == 3:
-        switch_thread_to_menu(sys.argv[2])
+    elif action == "menu-thread" and (len(sys.argv) == 3 or
+                                      (len(sys.argv) == 5 and sys.argv[3] == "--model")):
+        switch_thread_to_menu(sys.argv[2], sys.argv[4] if len(sys.argv) == 5 else None)
     elif action == "menu-thread-mindlogic" and len(sys.argv) == 3:
         import menu_install
         menu_install.main(action, sys.argv[2])
