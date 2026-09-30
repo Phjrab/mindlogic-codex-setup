@@ -1,6 +1,7 @@
 import json
 from pathlib import Path
 import sqlite3
+from contextlib import closing
 import tempfile
 import unittest
 from unittest.mock import Mock, patch
@@ -13,14 +14,14 @@ class CandidateSafetyTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             home = Path(directory)
             config = home / "config.toml"
-            config.write_text('model_provider = "mindlogic_menu_router"\nmodel = "gpt-6-sol"\n')
+            config.write_text('model_provider = "mindlogic_menu_router"\nmodel = "gpt-6-sol"\n', encoding="utf-8")
             manifest = home / "mindlogic-menu-routes.json"
             manifest.write_text(json.dumps({"routes": {
                 "gpt-6-sol": {"provider": "openai", "model": "gpt-6-sol"},
                 "mindlogic--gpt-6-luna": {"provider": "mindlogic", "model": "gpt-6-luna"},
-            }}))
+            }}), encoding="utf-8")
             db = home / "state_5.sqlite"
-            with sqlite3.connect(db) as connection:
+            with closing(sqlite3.connect(db)) as connection, connection:
                 connection.execute("CREATE TABLE threads (id TEXT, model_provider TEXT, model TEXT, "
                                    "archived INTEGER, thread_source TEXT, updated_at INTEGER)")
                 connection.executemany("INSERT INTO threads VALUES (?,?,?,?,?,?)", [
@@ -38,13 +39,13 @@ class CandidateSafetyTests(unittest.TestCase):
     def test_router_mode_selects_only_supported_user_chats(self):
         with tempfile.TemporaryDirectory() as directory:
             home = Path(directory)
-            (home / "config.toml").write_text('model_provider = "mindlogic_menu_router"\n')
+            (home / "config.toml").write_text('model_provider = "mindlogic_menu_router"\n', encoding="utf-8")
             (home / "mindlogic-menu-routes.json").write_text(json.dumps({"routes": {
                 "gpt-6-sol": {"provider": "openai", "model": "gpt-6-sol"},
                 "mindlogic--gpt-6-astra": {"provider": "mindlogic", "model": "gpt-6-astra"},
-            }}))
+            }}), encoding="utf-8")
             db = home / "state_5.sqlite"
-            with sqlite3.connect(db) as connection:
+            with closing(sqlite3.connect(db)) as connection, connection:
                 connection.execute("CREATE TABLE threads (id TEXT, model_provider TEXT, model TEXT, "
                                    "archived INTEGER, thread_source TEXT, updated_at INTEGER)")
                 connection.executemany("INSERT INTO threads VALUES (?,?,?,?,?,?)", [
@@ -63,12 +64,12 @@ class CandidateSafetyTests(unittest.TestCase):
     def test_only_supported_user_threads_are_selected_with_archive_state(self):
         with tempfile.TemporaryDirectory() as directory:
             home = Path(directory)
-            (home / "config.toml").write_text('model_provider = "factchat"\n')
+            (home / "config.toml").write_text('model_provider = "factchat"\n', encoding="utf-8")
             (home / "mindlogic-models.json").write_text(json.dumps({"models": [
                 {"slug": "gpt-6-sol"}, {"slug": "gpt-5.6-sol"},
-            ]}))
+            ]}), encoding="utf-8")
             db = home / "state_5.sqlite"
-            with sqlite3.connect(db) as connection:
+            with closing(sqlite3.connect(db)) as connection, connection:
                 connection.execute("CREATE TABLE threads (id TEXT, model_provider TEXT, model TEXT, "
                                    "archived INTEGER, thread_source TEXT, updated_at INTEGER)")
                 connection.executemany("INSERT INTO threads VALUES (?,?,?,?,?,?)", [
@@ -87,7 +88,7 @@ class CandidateSafetyTests(unittest.TestCase):
                     ("user-router-new", "gpt-6-sol", False),
                     ("archived", "gpt-6-sol", True),
                 ])
-                (home / "config.toml").write_text('model_provider = "openai"\n')
+                (home / "config.toml").write_text('model_provider = "openai"\n', encoding="utf-8")
                 self.assertEqual(thread_sync.candidates(), [])
 
     def test_archived_threads_request_archive_preservation(self):
@@ -95,7 +96,7 @@ class CandidateSafetyTests(unittest.TestCase):
             home = Path(directory)
             switcher = home / "switcher.py"
             switcher.touch()
-            (home / "config.toml").write_text('model_provider = "factchat"\n')
+            (home / "config.toml").write_text('model_provider = "factchat"\n', encoding="utf-8")
             with patch.multiple(thread_sync, LOCK=home / "lock", SWITCHER=switcher,
                                 CONFIG=home / "config.toml"), \
                     patch.object(thread_sync, "candidates", return_value=[
@@ -113,7 +114,7 @@ class CandidateSafetyTests(unittest.TestCase):
             switcher = home / "switcher.py"
             switcher.touch()
             config = home / "config.toml"
-            config.write_text('model_provider = "mindlogic_menu_router"\n')
+            config.write_text('model_provider = "mindlogic_menu_router"\n', encoding="utf-8")
             with patch.multiple(thread_sync, LOCK=home / "lock", SWITCHER=switcher,
                                 CONFIG=config), \
                     patch.object(thread_sync, "candidates", return_value=[
@@ -126,7 +127,7 @@ class CandidateSafetyTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             home = Path(directory)
             config = home / "config.toml"
-            config.write_text('model_provider = "mindlogic_menu_router"\n')
+            config.write_text('model_provider = "mindlogic_menu_router"\n', encoding="utf-8")
             with patch.multiple(thread_sync, LOCK=home / "lock", SWITCHER=home / "not-installed.py",
                                 CONFIG=config), \
                     patch.object(thread_sync, "candidates", return_value=[
@@ -139,7 +140,7 @@ class CandidateSafetyTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             home = Path(directory)
             config = home / "config.toml"
-            config.write_text('model_provider = "mindlogic_menu_router"\n')
+            config.write_text('model_provider = "mindlogic_menu_router"\n', encoding="utf-8")
             installed = home / "installed-switcher.py"
             installed.touch()
             with patch.multiple(thread_sync, LOCK=home / "lock", SWITCHER=installed,

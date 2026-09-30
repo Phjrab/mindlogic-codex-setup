@@ -8,10 +8,10 @@ from http.client import HTTPConnection
 import json
 import os
 from pathlib import Path
-import plistlib
 import re
 import secrets
 import shutil
+import socket
 import subprocess
 import sys
 import tempfile
@@ -20,6 +20,7 @@ import tomllib
 import uuid
 
 import setup
+import platform_support
 from menu_router import read_mindlogic_key
 
 
@@ -30,10 +31,11 @@ MANIFEST = HOME / "mindlogic-menu-routes.json"
 STATE = HOME / "mindlogic-menu-state.json"
 ROUTER = HOME / "bin" / "mindlogic-menu-router.py"
 LABEL = "ai.mindlogic.codex-menu-router"
-AGENT = Path.home() / "Library" / "LaunchAgents" / f"{LABEL}.plist"
+AGENT = platform_support.service_path(HOME, LABEL)
 PORT = 18762
 PROVIDER = "mindlogic_menu_router"
 MANAGED_KEYS = ("model", "model_provider", "model_catalog_json")
+_previous_router_instance = None
 
 
 def mindlogic_alias(slug: str) -> str:
@@ -161,7 +163,7 @@ def catalog_and_routes() -> tuple[dict, dict]:
     cache_path = HOME / "models_cache.json"
     if not cache_path.is_file():
         raise ValueError("OpenAI account model cache is absent; cannot preserve the current picker")
-    cached = json.loads(cache_path.read_text())["models"]
+    cached = json.loads(cache_path.read_text(encoding="utf-8-sig"))["models"]
     bundled = setup.native_catalog()["models"]
     templates = {model["slug"]: model for model in bundled}
     templates.update({model["slug"]: model for model in cached})
@@ -169,8 +171,9 @@ def catalog_and_routes() -> tuple[dict, dict]:
     routes = {item["slug"]: {"provider": "openai", "model": item["slug"]} for item in openai}
     mindlogic = []
     unsupported = []
-    ordered_slugs = ("gpt-6-astra", "gpt-6-sol", "gpt-6-luna") + tuple(
-        slug for slug in setup.MODEL_NAMES if slug not in ("gpt-6-astra", "gpt-6-sol", "gpt-6-luna")
+    preferred_slugs = ("gpt-6.1-sol", "gpt-6-astra", "gpt-6-sol", "gpt-6-luna")
+    ordered_slugs = preferred_slugs + tuple(
+        slug for slug in setup.MODEL_NAMES if slug not in preferred_slugs
     )
     for slug in ordered_slugs:
         if slug not in available:
@@ -199,35 +202,44 @@ def catalog_and_routes() -> tuple[dict, dict]:
 
 
 def agent_plist() -> bytes:
-    return plistlib.dumps({"Label": LABEL, "ProgramArguments": [sys.executable, str(ROUTER),
-        "--manifest", str(MANIFEST), "--env-file", str(setup.ENV_FILE), "--port", str(PORT)],
-        "RunAtLoad": True, "KeepAlive": True,
-        "StandardOutPath": str(HOME / "mindlogic-menu-router.log"),
-        "StandardErrorPath": str(HOME / "mindlogic-menu-router.err")})
+    return platform_support.service_definition(HOME, LABEL, ROUTER,
+        ["--manifest", str(MANIFEST), "--env-file", str(setup.ENV_FILE), "--port", str(PORT)],
+        log_prefix="mindlogic-menu-router")
 
 
 def launch(action: str) -> None:
-    domain = f"gui/{os.getuid()}"
-    if action == "bootstrap":
-        command = ["launchctl", "bootstrap", domain, str(AGENT)]
-    elif action == "kickstart":
-        command = ["launchctl", "kickstart", "-k", f"{domain}/{LABEL}"]
-    else:
-        command = ["launchctl", "bootout", f"{domain}/{LABEL}"]
-    result = subprocess.run(command, capture_output=True, text=True)
-    if result.returncode and not (action == "bootout" and "could not find" in result.stderr.lower()):
-        raise RuntimeError(f"launchctl {action} failed: {result.stderr.strip()[:300]}")
+    global _previous_router_instance
+    _previous_router_instance = None
+    if action == "kickstart":
+        log = HOME / "mindlogic-menu-router.log"
+        if log.is_file():
+            for line in reversed(log.read_text(encoding="utf-8-sig").splitlines()):
+                try:
+                    item = json.loads(line)
+                except ValueError:
+                    continue
+                if item.get("event") == "listening":
+                    _previous_router_instance = item.get("instance_id")
+                    break
+    platform_support.launch_service(action, AGENT, LABEL)
 
 
-def await_router_health(seconds: float = 6) -> None:
+def await_router_health(seconds: float | None = None) -> None:
+    if seconds is None:
+        seconds = 22 if platform_support.is_windows() else 6
     deadline = time.monotonic() + seconds
+    expected = sha256(json.loads(MANIFEST.read_text(encoding="utf-8-sig"))["local_token"])[:16]
     while time.monotonic() < deadline:
         connection = HTTPConnection("127.0.0.1", PORT, timeout=0.5)
         try:
             connection.request("GET", "/health")
-            if connection.getresponse().status == 200:
+            response = connection.getresponse()
+            body = response.read()
+            payload = json.loads(body)
+            if (response.status == 200 and payload.get("router_id") == expected
+                    and payload.get("instance_id") and payload["instance_id"] != _previous_router_instance):
                 return
-        except OSError:
+        except (OSError, ValueError):
             pass
         finally:
             connection.close()
@@ -235,10 +247,15 @@ def await_router_health(seconds: float = 6) -> None:
     raise RuntimeError("Router service did not become healthy after launch")
 
 
-def install() -> None:
+def install(*, preserve_default: bool = False) -> None:
     if STATE.exists():
         raise ValueError("Menu router is already installed; use menu-refresh or menu-remove")
-    source = CONFIG.read_text() if CONFIG.exists() else ""
+    with socket.socket() as probe:
+        try:
+            probe.bind(("127.0.0.1", PORT))
+        except OSError as error:
+            raise ValueError(f"Router port {PORT} is in use; refusing to replace another service") from error
+    source = CONFIG.read_text(encoding="utf-8-sig") if CONFIG.exists() else ""
     parsed = tomllib.loads(source)
     if parsed.get("model_provider", "openai") not in ("openai", "factchat"):
         raise ValueError("Another custom provider is active; refusing to replace it")
@@ -255,30 +272,59 @@ def install() -> None:
                f'requires_openai_auth = true\nhttp_headers = {{ X-Mindlogic-Router-Token = "{manifest["local_token"]}" }}\n')
     values = {"model": selected, "model_provider": PROVIDER, "model_catalog_json": str(CATALOG)}
     updated = edit_config(source, values, provider_section=section)
+    profile_path = HOME / "mindlogic-menu.config.toml"
+    if preserve_default and profile_path.exists():
+        raise ValueError("Mindlogic menu profile already exists; refusing to overwrite it")
+    profile_text = edit_config("", values, provider_section=section)
     state = {"original_keys": top_level_lines(source), "original_values": {key: parsed.get(key) for key in MANAGED_KEYS},
              "installed_values": values, "provider_section": section, "config_before_sha256": sha256(source),
              "config_after_sha256": sha256(updated), "initial_config_existed": CONFIG.exists()}
+    state["preserve_default"] = preserve_default
+    if preserve_default:
+        state["config_after_sha256"] = sha256(source)
+        state["profile_path"] = str(profile_path)
     if AGENT.exists() or ROUTER.exists() or CATALOG.exists() or MANIFEST.exists():
         raise ValueError("A menu-router file already exists; refusing to overwrite it")
-    if (CONFIG.read_text() if CONFIG.exists() else "") != source:
+    if (CONFIG.read_text(encoding="utf-8-sig") if CONFIG.exists() else "") != source:
         raise ValueError("Codex configuration changed during installation; retry without overwriting it")
-    config_backup = backup(CONFIG)
+    config_backup = backup(CONFIG) if not preserve_default else None
     made = []
+    service_started = False
     try:
-        for path, data, mode in [
+        files = [
             (CATALOG, json.dumps(catalog, ensure_ascii=False, indent=2).encode() + b"\n", 0o600),
             (MANIFEST, json.dumps(manifest, ensure_ascii=False, indent=2).encode() + b"\n", 0o600),
             (ROUTER, (Path(__file__).with_name("menu_router.py")).read_bytes(), 0o700),
             (AGENT, agent_plist(), 0o600),
-            (CONFIG, updated.encode(), 0o600),
             (STATE, json.dumps(state, ensure_ascii=False, indent=2).encode() + b"\n", 0o600),
-        ]:
+        ]
+        files.append((profile_path if preserve_default else CONFIG,
+                      (profile_text if preserve_default else updated).encode("utf-8"), 0o600))
+        if platform_support.is_windows():
+            for path, data in platform_support.runtime_files(HOME):
+                if path.exists():
+                    if path.read_bytes() != data:
+                        raise ValueError(f"Existing runtime differs: {path}; update it explicitly")
+                else:
+                    files.append((path, data, 0o700))
+        if preserve_default:
+            cli = HOME / "bin" / "mindlogic-cli.py"
+            command = HOME / "bin" / "mindlogic-menu.cmd"
+            if cli.exists() or (platform_support.is_windows() and command.exists()):
+                raise ValueError("Profile launcher already exists")
+            files.append((cli, Path(__file__).with_name("mindlogic_cli.py").read_bytes(), 0o700))
+            if platform_support.is_windows():
+                # Select UTF-8 before cmd.exe reads the non-ASCII Python path.
+                cmd = '@echo off\r\nchcp 65001 >nul\r\n' + subprocess.list2cmdline([sys.executable, "-X", "utf8"]) + ' "%~dp0mindlogic-cli.py" %*\r\n'
+                files.append((command, cmd.encode("utf-8"), 0o700))
+        for path, data, mode in files:
             atomic_bytes(path, data, mode)
             made.append(path)
         launch("bootstrap")
+        service_started = True
         await_router_health()
     except BaseException:
-        if AGENT in made:
+        if service_started:
             try:
                 launch("bootout")
             except RuntimeError:
@@ -294,28 +340,42 @@ def install() -> None:
     print(f"Installed: {len(catalog['models'])} picker models, {len(manifest['routes'])} routes")
     print("First application may require reopening the Codex app.")
     print("ChatGPT login authenticates OpenAI routes; Mindlogic uses FACTCHAT_API_KEY.")
+    if preserve_default:
+        print(f"OpenAI default preserved. Separate CLI profile: codex --profile mindlogic-menu")
+        print(f"Key-loading launcher: python {HOME / 'bin' / 'mindlogic-cli.py'}")
+        print("Desktop default activation requires the explicit menu-activate command.")
 
 
 def refresh() -> None:
     if not STATE.exists():
         raise ValueError("Menu router is not installed")
     catalog, manifest = catalog_and_routes()
-    manifest["local_token"] = json.loads(MANIFEST.read_text())["local_token"]
-    current = tomllib.loads(CONFIG.read_text())
+    manifest["local_token"] = json.loads(MANIFEST.read_text(encoding="utf-8-sig"))["local_token"]
+    current = tomllib.loads(CONFIG.read_text(encoding="utf-8-sig"))
     if current.get("model_provider") == PROVIDER and current.get("model") not in manifest["routes"]:
         raise ValueError("Current picker model is no longer available; choose a supported model before refreshing")
-    originals = {path: path.read_bytes() for path in (CATALOG, MANIFEST, ROUTER)}
+    updates = {ROUTER: Path(__file__).with_name("menu_router.py").read_bytes()}
+    if platform_support.is_windows():
+        updates.update(platform_support.runtime_files(HOME))
+    cli = HOME / "bin" / "mindlogic-cli.py"
+    if cli.exists():
+        updates[cli] = Path(__file__).with_name("mindlogic_cli.py").read_bytes()
+    originals = {path: path.read_bytes() if path.exists() else None for path in (CATALOG, MANIFEST, *updates)}
     for path in originals:
         backup(path)
     try:
         atomic_bytes(CATALOG, json.dumps(catalog, ensure_ascii=False, indent=2).encode() + b"\n")
         atomic_bytes(MANIFEST, json.dumps(manifest, ensure_ascii=False, indent=2).encode() + b"\n")
-        atomic_bytes(ROUTER, Path(__file__).with_name("menu_router.py").read_bytes(), 0o700)
+        for path, data in updates.items():
+            atomic_bytes(path, data, 0o700)
         launch("kickstart")
         await_router_health()
     except BaseException:
         for path, data in originals.items():
-            atomic_bytes(path, data, 0o700 if path == ROUTER else 0o600)
+            if data is None:
+                path.unlink(missing_ok=True)
+            else:
+                atomic_bytes(path, data, 0o700 if path in updates else 0o600)
         launch("kickstart")
         raise
     print(f"Refreshed {len(catalog['models'])} picker models; restart may be needed to reload the new catalog")
@@ -334,10 +394,14 @@ def set_chatgpt_auth(enabled: bool) -> None:
     """Update the installed local provider without changing the selected provider or model."""
     if not STATE.is_file() or not ROUTER.is_file():
         raise ValueError("Menu router is not installed")
-    state = json.loads(STATE.read_text())
-    source = CONFIG.read_text()
+    state = json.loads(STATE.read_text(encoding="utf-8-sig"))
     old_section = state["provider_section"]
-    if source.count(old_section) != 1:
+    targets = [CONFIG]
+    if state.get("profile_path"):
+        targets.append(Path(state["profile_path"]))
+    sources = {path: path.read_text(encoding="utf-8-sig") for path in targets if path.exists()}
+    sources = {path: source for path, source in sources.items() if PROVIDER in tomllib.loads(source).get("model_providers", {})}
+    if not sources or any(source.count(old_section) != 1 for source in sources.values()):
         raise ValueError("Installed router provider settings changed; refusing to overwrite them")
     desired = str(enabled).lower()
     previous = str(not enabled).lower()
@@ -348,17 +412,20 @@ def set_chatgpt_auth(enabled: bool) -> None:
             print(f"Router ChatGPT authentication is already {desired}")
             return
         raise ValueError("Installed router authentication setting is unrecognized")
-    updated = source.replace(old_section, new_section, 1)
-    tomllib.loads(updated)
+    updates = {path: source.replace(old_section, new_section, 1) for path, source in sources.items()}
+    for updated in updates.values():
+        tomllib.loads(updated)
     state["provider_section"] = new_section
-    state["config_after_sha256"] = sha256(updated)
-    originals = {path: path.read_bytes() for path in (CONFIG, STATE, ROUTER)}
+    if CONFIG in updates:
+        state["config_after_sha256"] = sha256(updates[CONFIG])
+    originals = {path: path.read_bytes() for path in (*updates, STATE, ROUTER)}
     for path in originals:
         backup(path)
     try:
         atomic_bytes(ROUTER, Path(__file__).with_name("menu_router.py").read_bytes(), 0o700)
         atomic_bytes(STATE, json.dumps(state, ensure_ascii=False, indent=2).encode() + b"\n")
-        atomic_bytes(CONFIG, updated.encode(), CONFIG.stat().st_mode & 0o777)
+        for path, updated in updates.items():
+            atomic_bytes(path, updated.encode("utf-8"), path.stat().st_mode & 0o777)
         launch("kickstart")
         await_router_health()
     except BaseException:
@@ -373,14 +440,16 @@ def activate() -> None:
     """Restore the installed menu router as the default without discarding user settings."""
     if not STATE.is_file() or not MANIFEST.is_file() or not CATALOG.is_file():
         raise ValueError("Menu router is not installed; run menu-install first")
-    source = CONFIG.read_text()
+    source_bytes = CONFIG.read_bytes()
+    source = CONFIG.read_text(encoding="utf-8-sig")
     parsed = tomllib.loads(source)
-    state = json.loads(STATE.read_text())
+    state = json.loads(STATE.read_text(encoding="utf-8-sig"))
     section = state.get("provider_section", "")
-    if not section or source.count(section) != 1:
+    add_section = bool(state.get("preserve_default") and PROVIDER not in parsed.get("model_providers", {}))
+    if not section or (not add_section and source.count(section) != 1):
         raise ValueError("Installed router provider settings changed; refusing to overwrite them")
-    routes = json.loads(MANIFEST.read_text()).get("routes", {})
-    catalog_models = {item.get("slug") for item in json.loads(CATALOG.read_text()).get("models", [])}
+    routes = json.loads(MANIFEST.read_text(encoding="utf-8-sig")).get("routes", {})
+    catalog_models = {item.get("slug") for item in json.loads(CATALOG.read_text(encoding="utf-8-sig")).get("models", [])}
     current_model = parsed.get("model")
     candidates = []
     if isinstance(current_model, str):
@@ -392,10 +461,13 @@ def activate() -> None:
         candidates.append(current_model)
     selected = next((candidate for candidate in candidates
                      if candidate in catalog_models and candidate in routes), None)
+    if (state.get("preserve_default") and parsed.get("model_provider", "openai") == "openai"
+            and current_model in catalog_models and routes.get(current_model, {}).get("provider") == "openai"):
+        selected = current_model
     if selected is None:
         raise ValueError("Current model has no installed Mindlogic menu entry; choose a supported model before activating")
     values = {"model": selected, "model_provider": PROVIDER, "model_catalog_json": str(CATALOG)}
-    updated = edit_config(source, values)
+    updated = edit_config(source, values, provider_section=section if add_section else None)
     if updated == source:
         print("Mindlogic menu is already active")
         return
@@ -405,7 +477,7 @@ def activate() -> None:
         launch("kickstart")
         await_router_health()
     except BaseException:
-        atomic_bytes(CONFIG, source.encode(), CONFIG.stat().st_mode & 0o777)
+        atomic_bytes(CONFIG, source_bytes, CONFIG.stat().st_mode & 0o777)
         launch("kickstart")
         raise
     print("Mindlogic model menu activated; existing thread providers were not changed")
@@ -413,14 +485,18 @@ def activate() -> None:
 
 def status() -> None:
     installed = STATE.exists()
-    parsed = tomllib.loads(CONFIG.read_text()) if CONFIG.exists() else {}
+    parsed = tomllib.loads(CONFIG.read_text(encoding="utf-8-sig")) if CONFIG.exists() else {}
     print("Installed:", installed)
     print("Configured provider:", parsed.get("model_provider", "openai"))
     print("Configured model:", parsed.get("model", "Codex default"))
     print("Catalog:", parsed.get("model_catalog_json", "Codex default"))
     print("Router service:", "configured" if AGENT.exists() else "absent")
+    if installed:
+        state = json.loads(STATE.read_text(encoding="utf-8-sig"))
+        if state.get("profile_path"):
+            print("Separate CLI profile:", state["profile_path"])
     if installed and parsed.get("model_provider") != PROVIDER:
-        print("Menu router is inactive; the user's current provider setting was preserved.")
+        print("Default configuration uses the original provider; the separate profile can use the router.")
     print("Observed app thread provider: unverified")
     print("Observed upstream request: unverified (see secret-free router log after a user request)")
 
@@ -428,10 +504,26 @@ def status() -> None:
 def remove() -> None:
     if not STATE.exists():
         raise ValueError("Menu router is not installed")
-    state = json.loads(STATE.read_text())
-    source = CONFIG.read_text()
+    state = json.loads(STATE.read_text(encoding="utf-8-sig"))
+    source = CONFIG.read_text(encoding="utf-8-sig")
     parsed = tomllib.loads(source)
-    routes = json.loads(MANIFEST.read_text())["routes"]
+    routes = json.loads(MANIFEST.read_text(encoding="utf-8-sig"))["routes"]
+    profile_path = Path(state["profile_path"]) if state.get("profile_path") else None
+    if profile_path:
+        profile_source = profile_path.read_text(encoding="utf-8-sig")
+        profile = tomllib.loads(profile_source)
+        if (profile_source.count(state["provider_section"]) != 1 or profile.get("model") not in routes
+                or profile.get("model_provider") != PROVIDER or profile.get("model_catalog_json") != str(CATALOG)):
+            raise ValueError("Separate profile changed; refusing automatic removal")
+    if state.get("preserve_default") and PROVIDER not in parsed.get("model_providers", {}):
+        launch("bootout")
+        for path in (AGENT, ROUTER, MANIFEST, CATALOG, STATE, profile_path,
+                     HOME / "bin" / "mindlogic-cli.py", HOME / "bin" / "mindlogic-menu.cmd"):
+            if path:
+                path.unlink(missing_ok=True)
+        print("Removed separate menu profile and router; OpenAI default configuration was preserved.")
+        platform_support.cleanup_runtime(HOME)
+        return
     if parsed.get("model") not in routes:
         raise ValueError("Selected model is outside the installed catalog; refusing to overwrite it")
     for key, expected in state["installed_values"].items():
@@ -457,6 +549,10 @@ def remove() -> None:
         raise
     for path in (AGENT, ROUTER, MANIFEST, CATALOG, STATE):
         path.unlink(missing_ok=True)
+    if profile_path:
+        for path in (profile_path, HOME / "bin" / "mindlogic-cli.py", HOME / "bin" / "mindlogic-menu.cmd"):
+            path.unlink(missing_ok=True)
+    platform_support.cleanup_runtime(HOME)
     print("Removed menu router. Reopen Codex to restore its original picker.")
 
 
@@ -469,9 +565,9 @@ def switch_thread_to_mindlogic(thread_id: str) -> None:
     """Select the Mindlogic route for an existing, unloaded thread without a model call."""
     if str(uuid.UUID(thread_id)) != thread_id:
         raise ValueError("Use the exact canonical threadId")
-    if not STATE.exists() or tomllib.loads(CONFIG.read_text()).get("model_provider") != PROVIDER:
+    if not STATE.exists() or tomllib.loads(CONFIG.read_text(encoding="utf-8-sig")).get("model_provider") != PROVIDER:
         raise ValueError("Activate the menu router first")
-    routes = json.loads(MANIFEST.read_text())["routes"]
+    routes = json.loads(MANIFEST.read_text(encoding="utf-8-sig"))["routes"]
     with setup.AppServer() as server:
         thread = server.call("thread/read", {"threadId": thread_id})["thread"]
         if thread["id"] != thread_id or thread["status"]["type"] != "notLoaded":

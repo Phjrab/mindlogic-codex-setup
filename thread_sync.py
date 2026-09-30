@@ -3,17 +3,17 @@
 
 from __future__ import annotations
 
-import fcntl
 import json
 import os
 from pathlib import Path
-import plistlib
 import shutil
 import sqlite3
+from contextlib import closing
 import subprocess
 import sys
 import tempfile
 import tomllib
+import platform_support
 
 
 HOME = Path(os.environ.get("CODEX_HOME", Path.home() / ".codex")).expanduser()
@@ -25,7 +25,7 @@ SCRIPT = HOME / "bin" / "mindlogic-thread-sync.py"
 SWITCHER = HOME / "bin" / "mindlogic-thread-switch.py"
 LOCK = HOME / "mindlogic-thread-sync.lock"
 LABEL = "ai.mindlogic.codex-thread-sync"
-AGENT = Path.home() / "Library" / "LaunchAgents" / f"{LABEL}.plist"
+AGENT = platform_support.service_path(HOME, LABEL)
 
 
 def atomic_copy(source: Path, target: Path, mode: int) -> None:
@@ -45,17 +45,17 @@ def atomic_copy(source: Path, target: Path, mode: int) -> None:
 def candidates() -> list[tuple[str, str, bool]]:
     if not CONFIG.is_file() or not DB.is_file():
         return []
-    config = tomllib.loads(CONFIG.read_text())
+    config = tomllib.loads(CONFIG.read_text(encoding="utf-8-sig"))
     provider_mode = config.get("model_provider")
     if provider_mode == "factchat" and CATALOG.is_file():
-        available = {model["slug"] for model in json.loads(CATALOG.read_text())["models"]}
+        available = {model["slug"] for model in json.loads(CATALOG.read_text(encoding="utf-8-sig"))["models"]}
         legacy_providers = ("openai", "mindlogic_menu_router")
     elif provider_mode == "mindlogic_menu_router" and MENU_MANIFEST.is_file():
-        routes = json.loads(MENU_MANIFEST.read_text())["routes"]
+        routes = json.loads(MENU_MANIFEST.read_text(encoding="utf-8-sig"))["routes"]
         legacy_providers = ("openai", "factchat")
     else:
         return []
-    with sqlite3.connect(f"file:{DB}?mode=ro", uri=True) as database:
+    with closing(sqlite3.connect(DB.resolve().as_uri() + "?mode=ro", uri=True)) as database:
         rows = database.execute("""SELECT id, model_provider, model, archived FROM threads
             WHERE thread_source = 'user'
               AND model_provider IN (?, ?)
@@ -85,10 +85,10 @@ def replacement_candidates() -> list[tuple[str, str, str, bool]]:
     """Find user chats whose old model is absent from the installed router menu."""
     if not CONFIG.is_file() or not DB.is_file() or not MENU_MANIFEST.is_file():
         return []
-    config = tomllib.loads(CONFIG.read_text())
+    config = tomllib.loads(CONFIG.read_text(encoding="utf-8-sig"))
     if config.get("model_provider") != "mindlogic_menu_router":
         return []
-    routes = json.loads(MENU_MANIFEST.read_text())["routes"]
+    routes = json.loads(MENU_MANIFEST.read_text(encoding="utf-8-sig"))["routes"]
     configured = config.get("model")
 
     def fallback(provider: str) -> str | None:
@@ -109,7 +109,7 @@ def replacement_candidates() -> list[tuple[str, str, str, bool]]:
                 return alias
         return None
 
-    with sqlite3.connect(f"file:{DB}?mode=ro", uri=True) as database:
+    with closing(sqlite3.connect(DB.resolve().as_uri() + "?mode=ro", uri=True)) as database:
         rows = database.execute("""SELECT id, model_provider, model, archived FROM threads
             WHERE thread_source = 'user' AND model_provider IN ('openai', 'factchat')
             ORDER BY updated_at DESC""").fetchall()
@@ -129,11 +129,11 @@ def replacement_candidates() -> list[tuple[str, str, str, bool]]:
 
 
 def run_once(include_unsupported: bool = False) -> tuple[int, int, int]:
+    if not CONFIG.is_file():
+        return (0, 0, 0)
     LOCK.parent.mkdir(parents=True, exist_ok=True)
     with LOCK.open("a+") as lock:
-        try:
-            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError:
+        if not platform_support.try_lock(lock):
             if include_unsupported:
                 raise RuntimeError("Another chat migration is running; retry in a moment")
             return (0, 0, 0)
@@ -142,7 +142,7 @@ def run_once(include_unsupported: bool = False) -> tuple[int, int, int]:
         switcher = checkout_switcher if include_unsupported or not SWITCHER.is_file() else SWITCHER
         if not switcher.is_file():
             return (0, 0, 1)
-        router_mode = tomllib.loads(CONFIG.read_text()).get("model_provider") == "mindlogic_menu_router"
+        router_mode = tomllib.loads(CONFIG.read_text(encoding="utf-8-sig")).get("model_provider") == "mindlogic_menu_router"
         normal = [(thread_id, model, archived, None) for thread_id, model, archived in candidates()]
         replacements = replacement_candidates() if include_unsupported else []
         work = normal + [(thread_id, old_model, archived, new_model)
@@ -156,7 +156,7 @@ def run_once(include_unsupported: bool = False) -> tuple[int, int, int]:
                 if archived and not router_mode:
                     command.append("--preserve-archive")
                 result = subprocess.run(
-                    command, text=True, capture_output=True, timeout=120, check=False,
+                    command, text=True, encoding="utf-8", capture_output=True, timeout=120, check=False,
                 )
             except (OSError, subprocess.TimeoutExpired):
                 failed += 1
@@ -180,12 +180,7 @@ def run_once(include_unsupported: bool = False) -> tuple[int, int, int]:
 
 
 def launch(action: str) -> None:
-    domain = f"gui/{os.getuid()}"
-    command = (["launchctl", "bootstrap", domain, str(AGENT)] if action == "bootstrap"
-               else ["launchctl", "bootout", f"{domain}/{LABEL}"])
-    result = subprocess.run(command, text=True, capture_output=True, check=False)
-    if result.returncode:
-        raise RuntimeError(f"launchctl {action}: {result.stderr.strip()[:200]}")
+    platform_support.launch_service(action, AGENT, LABEL)
 
 
 def install() -> None:
@@ -195,16 +190,19 @@ def install() -> None:
     switcher_source = origin.with_name("setup.py")
     if not switcher_source.is_file():
         raise RuntimeError("setup.py must be next to thread_sync.py")
-    plist = plistlib.dumps({
-        "Label": LABEL,
-        "ProgramArguments": [sys.executable, str(SCRIPT)],
-        "RunAtLoad": True,
-        "StartInterval": 60,
-        "StandardOutPath": str(HOME / "mindlogic-thread-sync.log"),
-        "StandardErrorPath": str(HOME / "mindlogic-thread-sync.err"),
-    })
+    plist = platform_support.service_definition(HOME, LABEL, SCRIPT, [],
+        interval=60, log_prefix="mindlogic-thread-sync")
     made = []
     try:
+        if platform_support.is_windows():
+            for target, data in platform_support.runtime_files(HOME):
+                if target.exists():
+                    if target.read_bytes() != data:
+                        raise RuntimeError(f"Existing runtime differs: {target}")
+                else:
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    target.write_bytes(data)
+                    made.append(target)
         atomic_copy(origin, SCRIPT, 0o700)
         made.append(SCRIPT)
         atomic_copy(switcher_source, SWITCHER, 0o700)
@@ -232,6 +230,7 @@ def remove() -> None:
     launch("bootout")
     for path in (AGENT, SCRIPT, SWITCHER):
         path.unlink(missing_ok=True)
+    platform_support.cleanup_runtime(HOME)
     print("Removed thread sync; conversation providers were not changed.")
 
 

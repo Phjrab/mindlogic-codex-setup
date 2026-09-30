@@ -9,12 +9,14 @@ import json
 import os
 from pathlib import Path
 import re
-import select
+import queue
 import shutil
 import sqlite3
+from contextlib import closing
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import uuid
 from datetime import datetime
@@ -22,6 +24,7 @@ from datetime import datetime
 
 GATEWAY = "https://factchat-cloud.mindlogic.ai/v1/gateway"
 MODEL_NAMES = {
+    "gpt-6.1-sol": "GPT-6.1 Sol",
     "gpt-6-sol": "GPT-6 Sol",
     "gpt-6-luna": "GPT-6 Luna",
     "gpt-6-astra": "GPT-6 Astra",
@@ -42,6 +45,16 @@ def fail(message: str) -> None:
 
 
 def codex_executable() -> str:
+    if sys.platform == "win32":
+        found = shutil.which("codex.exe") or shutil.which("codex")
+        if found:
+            return found
+        local = os.environ.get("LOCALAPPDATA")
+        if local:
+            binaries = list((Path(local) / "OpenAI" / "Codex" / "bin").glob("*/codex.exe"))
+            if binaries:
+                return str(max(binaries, key=lambda path: path.stat().st_mtime))
+        fail("Codex CLI를 찾지 못했습니다. Codex 앱 또는 CLI를 먼저 설치하세요.")
     candidates = [
         str(Path(app) / "Contents/Resources" / relative)
         for app in ("/Applications/ChatGPT.app", "/Applications/Codex.app")
@@ -58,7 +71,7 @@ def read_env_key() -> str | None:
         return os.environ["FACTCHAT_API_KEY"]
     if not ENV_FILE.exists():
         return None
-    for line in ENV_FILE.read_text().splitlines():
+    for line in ENV_FILE.read_text(encoding="utf-8-sig").splitlines():
         match = re.match(r"^\s*(?:export\s+)?FACTCHAT_API_KEY\s*=\s*(.*?)\s*$", line)
         if match:
             value = match.group(1)
@@ -76,6 +89,7 @@ def account_models(key: str) -> set[str]:
         ["curl", "--silent", "--show-error", "--fail", "--max-time", "20", "--config", "-"],
         input=config,
         text=True,
+        encoding="utf-8",
         capture_output=True,
         check=False,
     )
@@ -96,6 +110,7 @@ def native_catalog() -> dict:
             [codex_executable(), "debug", "models", "--bundled"],
             env=env,
             text=True,
+            encoding="utf-8",
             capture_output=True,
             check=False,
             timeout=20,
@@ -110,13 +125,17 @@ def native_catalog() -> dict:
 
 def build_catalog(available: set[str]) -> dict:
     native = {model["slug"]: model for model in native_catalog()["models"]}
+    cache = CODEX_HOME / "models_cache.json"
+    if cache.is_file():
+        native.update({model["slug"]: model for model in
+                       json.loads(cache.read_text(encoding="utf-8-sig"))["models"]})
     models = []
     for slug, name in MODEL_NAMES.items():
         if slug not in available:
             continue
-        template = native.get(slug) or native.get("gpt-6-astra")
+        template = native.get(slug)
         if template is None:
-            fail("이 Codex 버전에는 GPT-6 Astra 메타데이터가 없습니다. 설치를 중단합니다.")
+            continue
         model = copy.deepcopy(template)
         model.update(
             slug=slug,
@@ -139,7 +158,7 @@ def build_catalog(available: set[str]) -> dict:
         ]
         models.append(model)
     if not models:
-        fail("이 키에서 Codex Responses용 OpenAI 모델 7개 중 사용 가능한 모델을 찾지 못했습니다.")
+        fail("계정에서 사용 가능한 모델 중 일치하는 Codex 메타데이터가 있는 모델을 찾지 못했습니다.")
     return {"models": models}
 
 
@@ -153,7 +172,7 @@ def write_private(path: Path, data: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     descriptor, temporary = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
     try:
-        with os.fdopen(descriptor, "w") as stream:
+        with os.fdopen(descriptor, "w", encoding="utf-8", newline="\n") as stream:
             stream.write(data)
         os.chmod(temporary, path.stat().st_mode & 0o777 if path.exists() else 0o600)
         os.replace(temporary, path)
@@ -204,7 +223,7 @@ def update_config(config: str, *, provider: str, model: str, effort: str, catalo
 
 
 def save_key(key: str) -> None:
-    existing = ENV_FILE.read_text() if ENV_FILE.exists() else ""
+    existing = ENV_FILE.read_text(encoding="utf-8-sig") if ENV_FILE.exists() else ""
     updated = re.sub(
         r'^\s*(?:export\s+)?FACTCHAT_API_KEY\s*=.*$',
         f'FACTCHAT_API_KEY={key}',
@@ -222,8 +241,11 @@ def save_key(key: str) -> None:
     os.chmod(ENV_FILE, 0o600)
 
 
-def install() -> None:
+def install(*, preserve_default: bool = False) -> None:
     CODEX_HOME.mkdir(parents=True, exist_ok=True)
+    direct_profile = CODEX_HOME / "mindlogic.config.toml"
+    if preserve_default and direct_profile.exists():
+        fail("Mindlogic 별도 프로필이 이미 있습니다. 기존 파일을 덮어쓰지 않습니다.")
     key = read_env_key()
     entered = key is None
     if entered:
@@ -232,26 +254,40 @@ def install() -> None:
         fail("API 키가 없어 설치를 중단합니다.")
     available = account_models(key)
     catalog = build_catalog(available)
-    current = CONFIG.read_text() if CONFIG.exists() else ""
+    current = CONFIG.read_text(encoding="utf-8-sig") if CONFIG.exists() else ""
     previous = {
         "openai_model": (top_level_value(current, "model") or "gpt-6-astra") if top_level_value(current, "model_provider") in (None, "openai") else "gpt-6-astra",
         "openai_effort": top_level_value(current, "model_reasoning_effort") or "medium",
     }
     if PROFILE.exists():
-        previous = json.loads(PROFILE.read_text())
+        previous = json.loads(PROFILE.read_text(encoding="utf-8-sig"))
     chosen = catalog["models"][0]["slug"]
-    updated = update_config(current, provider="factchat", model=chosen, effort="medium", catalog=True)
+    updated = update_config("" if preserve_default else current,
+                            provider="factchat", model=chosen, effort="medium", catalog=True)
     save_key(key)
-    backup(CONFIG)
+    if not preserve_default:
+        backup(CONFIG)
     backup(CATALOG)
     write_private(CATALOG, json.dumps(catalog, ensure_ascii=False, indent=2) + "\n")
     write_private(PROFILE, json.dumps(previous, indent=2) + "\n")
-    write_private(CONFIG, updated)
+    write_private(direct_profile if preserve_default else CONFIG, updated)
     destination = CODEX_HOME / "bin" / "codex-profile"
     destination.parent.mkdir(parents=True, exist_ok=True)
     if Path(__file__).resolve() != destination.resolve():
         shutil.copy2(Path(__file__), destination)
     os.chmod(destination, 0o755)
+    if sys.platform == "win32":
+        command = CODEX_HOME / "bin" / "codex-profile.cmd"
+        write_private(command, '@echo off\nchcp 65001 >nul\n' + subprocess.list2cmdline([sys.executable, "-X", "utf8"]) + ' "%~dp0codex-profile" %*\n')
+    if preserve_default:
+        cli = CODEX_HOME / "bin" / "mindlogic-direct-cli.py"
+        shutil.copy2(Path(__file__).with_name("mindlogic_cli.py"), cli)
+        if sys.platform == "win32":
+            command = CODEX_HOME / "bin" / "mindlogic.cmd"
+            write_private(command, '@echo off\nchcp 65001 >nul\n' + subprocess.list2cmdline([sys.executable, "-X", "utf8"]) + ' "%~dp0mindlogic-direct-cli.py" --profile mindlogic %*\n')
+        print(f"OpenAI default preserved. Separate profile: {direct_profile}")
+        print(f"Run: python {cli} --profile mindlogic")
+        return
     print(f"Installed {len(catalog['models'])} Mindlogic models. Active model: {chosen}")
     print(f"Switch profiles with: {destination} openai | mindlogic | status")
     print("Codex 앱을 재시작한 뒤 새 채팅에서 모델 메뉴를 확인하세요.")
@@ -260,15 +296,15 @@ def install() -> None:
 def switch(target: str) -> None:
     if not CONFIG.exists() or not PROFILE.exists() or not CATALOG.exists():
         fail("먼저 'python3 setup.py install'을 실행하세요.")
-    current = CONFIG.read_text()
-    profile = json.loads(PROFILE.read_text())
+    current = CONFIG.read_text(encoding="utf-8-sig")
+    profile = json.loads(PROFILE.read_text(encoding="utf-8-sig"))
     if target == "openai":
         provider, model = "openai", profile["openai_model"]
         effort = profile["openai_effort"]
         use_catalog = False
     else:
         provider = "factchat"
-        model = json.loads(CATALOG.read_text())["models"][0]["slug"]
+        model = json.loads(CATALOG.read_text(encoding="utf-8-sig"))["models"][0]["slug"]
         effort = "medium"
         use_catalog = True
     backup(CONFIG)
@@ -280,7 +316,7 @@ def switch(target: str) -> None:
 
 
 def status() -> None:
-    current = CONFIG.read_text() if CONFIG.exists() else ""
+    current = CONFIG.read_text(encoding="utf-8-sig") if CONFIG.exists() else ""
     print("Provider:", top_level_value(current, "model_provider") or "openai (default)")
     print("Model:", top_level_value(current, "model") or "Codex default")
 
@@ -297,7 +333,9 @@ class AppServer:
             bufsize=0,
         )
         self.request_id = 0
-        self.read_buffer = b""
+        self.replies = queue.Queue()
+        self.reader = threading.Thread(target=self._read_replies, daemon=True)
+        self.reader.start()
         try:
             self.call("initialize", {"clientInfo": {
                 "name": "mindlogic_codex_setup",
@@ -311,14 +349,26 @@ class AppServer:
         return self
 
     def __exit__(self, *_exc):
-        if self.process.poll() is not None:
-            return
-        self.process.terminate()
+        if self.process.poll() is None:
+            self.process.terminate()
+            try:
+                self.process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                self.process.kill()
+                self.process.wait(timeout=5)
+        self.reader.join(timeout=2)
+        self.process.stdin.close()
+        self.process.stdout.close()
+
+    def _read_replies(self) -> None:
         try:
-            self.process.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            self.process.kill()
-            self.process.wait(timeout=5)
+            while line := self.process.stdout.readline():
+                if line.strip():
+                    self.replies.put(json.loads(line))
+        except (OSError, ValueError) as error:
+            self.replies.put(error)
+        finally:
+            self.replies.put(None)
 
     def call(self, method: str, params: dict, *, response: bool = True) -> dict | None:
         self.request_id += 1
@@ -331,21 +381,14 @@ class AppServer:
             return None
         deadline = time.monotonic() + 30
         while time.monotonic() < deadline:
-            if b"\n" not in self.read_buffer:
-                ready, _, _ = select.select(
-                    [self.process.stdout], [], [], max(0, deadline - time.monotonic())
-                )
-                if not ready:
-                    break
-                chunk = os.read(self.process.stdout.fileno(), 65536)
-                if not chunk:
-                    break
-                self.read_buffer += chunk
-                continue
-            line, self.read_buffer = self.read_buffer.split(b"\n", 1)
-            if not line.strip():
-                continue
-            reply = json.loads(line)
+            try:
+                reply = self.replies.get(timeout=max(0, deadline - time.monotonic()))
+            except queue.Empty:
+                break
+            if reply is None:
+                fail(f"Codex {method} 연결이 종료됐습니다.")
+            if isinstance(reply, Exception):
+                fail(f"Codex {method} 응답 해석 실패: {type(reply).__name__}")
             if reply.get("id") != self.request_id:
                 continue
             if "error" in reply:
@@ -362,18 +405,18 @@ def switch_existing_thread(thread_id: str, *, preserve_archive: bool = False) ->
             raise ValueError("non-canonical UUID")
     except ValueError:
         fail("정확한 Codex threadId(UUID)를 입력하세요.")
-    if not CONFIG.exists() or top_level_value(CONFIG.read_text(), "model_provider") != "factchat":
+    if not CONFIG.exists() or top_level_value(CONFIG.read_text(encoding="utf-8-sig"), "model_provider") != "factchat":
         fail("먼저 'codex-profile mindlogic'으로 기본 제공자를 설정하세요.")
     if not read_env_key():
         fail("FACTCHAT_API_KEY가 없어 전환을 중단합니다.")
     if not CATALOG.exists():
         fail("Mindlogic 모델 목록이 없습니다. 먼저 설치를 완료하세요.")
-    supported = {item["slug"] for item in json.loads(CATALOG.read_text())["models"]}
+    supported = {item["slug"] for item in json.loads(CATALOG.read_text(encoding="utf-8-sig"))["models"]}
 
     archived = False
     if preserve_archive:
         database = CODEX_HOME / "state_5.sqlite"
-        with sqlite3.connect(f"file:{database}?mode=ro", uri=True) as connection:
+        with closing(sqlite3.connect(database.resolve().as_uri() + "?mode=ro", uri=True)) as connection:
             row = connection.execute("SELECT archived FROM threads WHERE id = ?", (thread_id,)).fetchone()
         if row is None:
             fail("대화를 찾지 못했습니다.")
@@ -385,7 +428,7 @@ def switch_existing_thread(thread_id: str, *, preserve_archive: bool = False) ->
             fail("요청한 대화와 조회된 대화 ID가 다릅니다.")
         if thread["status"]["type"] != "notLoaded":
             fail("대화가 아직 로드되어 있습니다. 앱에서 해당 대화를 보관한 뒤 다시 보관 해제하고, 다른 대화에서 이 명령을 실행하세요.")
-        model = thread.get("model") or top_level_value(CONFIG.read_text(), "model")
+        model = thread.get("model") or top_level_value(CONFIG.read_text(encoding="utf-8-sig"), "model")
         if thread.get("modelProvider") == "mindlogic_menu_router" and isinstance(model, str):
             for prefix in ("mindlogic/", "mindlogic--"):
                 if model.startswith(prefix):
@@ -425,7 +468,7 @@ def switch_existing_thread(thread_id: str, *, preserve_archive: bool = False) ->
                 thread.get("projectId") != project_id or thread.get("source") != source):
             fail("Mindlogic 실행 제공자가 저장되지 않았습니다. 요청을 보내지 마세요.")
     if archived:
-        with sqlite3.connect(f"file:{database}?mode=ro", uri=True) as connection:
+        with closing(sqlite3.connect(database.resolve().as_uri() + "?mode=ro", uri=True)) as connection:
             row = connection.execute("SELECT archived FROM threads WHERE id = ?", (thread_id,)).fetchone()
         if row is None or not row[0]:
             fail("원래 보관 상태가 복구되지 않았습니다.")
@@ -444,10 +487,10 @@ def switch_thread_to_menu(thread_id: str, model_override: str | None = None) -> 
     routes_file = CODEX_HOME / "mindlogic-menu-routes.json"
     database = CODEX_HOME / "state_5.sqlite"
     if (not menu_state.is_file() or not routes_file.is_file() or
-            top_level_value(CONFIG.read_text(), "model_provider") != "mindlogic_menu_router"):
+            top_level_value(CONFIG.read_text(encoding="utf-8-sig"), "model_provider") != "mindlogic_menu_router"):
         fail("Activate the Mindlogic model menu first")
-    routes = json.loads(routes_file.read_text())["routes"]
-    with sqlite3.connect(f"file:{database}?mode=ro", uri=True) as connection:
+    routes = json.loads(routes_file.read_text(encoding="utf-8-sig"))["routes"]
+    with closing(sqlite3.connect(database.resolve().as_uri() + "?mode=ro", uri=True)) as connection:
         row = connection.execute(
             "SELECT model_provider, model, archived, thread_source FROM threads WHERE id = ?",
             (thread_id,),
@@ -522,7 +565,7 @@ def switch_thread_to_menu(thread_id: str, model_override: str | None = None) -> 
                 turn_ids(server) != original_turn_ids):
             fail("Router provider was not persisted; do not send a prompt")
     if archived:
-        with sqlite3.connect(f"file:{database}?mode=ro", uri=True) as connection:
+        with closing(sqlite3.connect(database.resolve().as_uri() + "?mode=ro", uri=True)) as connection:
             state = connection.execute("SELECT archived FROM threads WHERE id = ?", (thread_id,)).fetchone()
         if state is None or not state[0]:
             fail("The chat's archived state was not restored")
@@ -531,7 +574,16 @@ def switch_thread_to_menu(thread_id: str, model_override: str | None = None) -> 
 
 def main() -> None:
     action = sys.argv[1] if len(sys.argv) >= 2 else None
-    if action in ("menu-install", "menu-refresh", "menu-activate", "menu-auth-isolate", "menu-auth-chatgpt", "menu-status", "menu-remove"):
+    if action == "menu-install":
+        if sys.argv[2:] not in ([], ["--preserve-default"], ["--activate"]):
+            fail("Usage: python setup.py menu-install [--preserve-default|--activate]")
+        import menu_install
+        preserve = sys.argv[2:] == ["--preserve-default"] or (sys.platform == "win32" and sys.argv[2:] != ["--activate"])
+        try:
+            menu_install.install(preserve_default=preserve)
+        except (ValueError, RuntimeError, OSError) as error:
+            fail(str(error))
+    elif action in ("menu-refresh", "menu-activate", "menu-auth-isolate", "menu-auth-chatgpt", "menu-status", "menu-remove"):
         if len(sys.argv) != 2:
             fail(f"Usage: python3 setup.py {action}")
         import menu_install
@@ -543,9 +595,10 @@ def main() -> None:
         import menu_install
         menu_install.main(action, sys.argv[2])
     elif action == "install":
-        if len(sys.argv) != 2:
-            fail("Usage: python3 setup.py install")
-        install()
+        if sys.argv[2:] not in ([], ["--preserve-default"], ["--activate"]):
+            fail("Usage: python setup.py install [--preserve-default|--activate]")
+        preserve = sys.argv[2:] == ["--preserve-default"] or (sys.platform == "win32" and sys.argv[2:] != ["--activate"])
+        install(preserve_default=preserve)
     elif action in ("openai", "mindlogic"):
         if len(sys.argv) != 2:
             fail(f"Usage: python3 setup.py {action}")

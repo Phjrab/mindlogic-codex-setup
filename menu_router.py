@@ -9,10 +9,12 @@ user's existing .env file at request time.
 from __future__ import annotations
 
 import argparse
+import hashlib
 from http import HTTPStatus
 from http.client import HTTPSConnection
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
+import os
 from pathlib import Path
 import re
 import socket
@@ -34,7 +36,7 @@ HOP_HEADERS = {"host", "connection", "content-length", "accept-encoding", "trans
 def read_mindlogic_key(path: Path) -> str:
     if not path.is_file():
         raise ValueError("FACTCHAT_API_KEY is not registered")
-    for line in path.read_text().splitlines():
+    for line in path.read_text(encoding="utf-8-sig").splitlines():
         match = re.match(r"^\s*(?:export\s+)?FACTCHAT_API_KEY\s*=\s*(.*?)\s*$", line)
         if match:
             value = match.group(1).strip()
@@ -61,10 +63,39 @@ class Router(ThreadingHTTPServer):
 
     def __init__(self, address, *, manifest: dict, env_file: Path):
         super().__init__(address, Handler)
+        self.instance_id = uuid.uuid4().hex
         self.manifest = manifest
         self.env_file = env_file
         self.thread_routes = {}
         self.thread_lock = threading.Lock()
+
+    def server_bind(self):
+        if sys.platform == "win32" and self.server_address[1]:
+            # Windows SO_REUSEADDR can also share a live listener. Refuse an
+            # occupied listening port, while allowing closed TCP connections
+            # to finish in TIME_WAIT across normal service restarts.
+            try:
+                probe = socket.create_connection(self.server_address, timeout=0.2)
+            except OSError:
+                pass
+            else:
+                probe.close()
+                raise OSError(10048, "Router port already has a listener")
+        super().server_bind()
+
+    def shutdown_request(self, request):
+        if sys.platform != "win32":
+            return super().shutdown_request(request)
+        # Drain the peer's graceful close before releasing a Windows connection.
+        try:
+            request.shutdown(socket.SHUT_WR)
+            request.settimeout(2)
+            while request.recv(8192):
+                pass
+        except OSError:
+            pass
+        finally:
+            self.close_request(request)
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -78,13 +109,19 @@ class Handler(BaseHTTPRequestHandler):
         self.send_response(status)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(data)))
-        self.send_header("Connection", "close")
         self.end_headers()
         self.wfile.write(data)
 
     def do_GET(self):
         if self.path == "/health":
-            self.reply(HTTPStatus.OK, "ok", "ready")
+            token = self.server.manifest.get("local_token", "")
+            data = json.dumps({"status": "ready", "router_id": hashlib.sha256(token.encode()).hexdigest()[:16],
+                               "instance_id": self.server.instance_id, "pid": os.getpid()}).encode()
+            self.send_response(HTTPStatus.OK)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
         else:
             self.reply(HTTPStatus.NOT_FOUND, "unknown_path", "Only /responses is supported")
 
@@ -154,15 +191,18 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_response(response.status)
                 self.send_header("Content-Type", response.getheader("Content-Type", "application/json"))
                 self.send_header("Cache-Control", "no-cache")
-                self.send_header("Connection", "close")
+                self.send_header("Transfer-Encoding", "chunked")
                 self.end_headers()
                 headers_sent = True
                 metadata["http_status"] = response.status
                 print(json.dumps(metadata, ensure_ascii=False), flush=True)
                 while chunk := response.read1(8192):
-                    self.wfile.write(chunk)
+                    self.wfile.write(f"{len(chunk):X}\r\n".encode() + chunk + b"\r\n")
                     self.wfile.flush()
+                self.wfile.write(b"0\r\n\r\n")
+                self.wfile.flush()
             except (BrokenPipeError, ConnectionResetError):
+                self.close_connection = True
                 metadata["client_cancelled"] = True
                 print(json.dumps(metadata, ensure_ascii=False), flush=True)
             finally:
@@ -174,6 +214,7 @@ class Handler(BaseHTTPRequestHandler):
             if not headers_sent:
                 self.reply(HTTPStatus.BAD_GATEWAY, "upstream_error", type(error).__name__)
             else:
+                self.close_connection = True
                 print(json.dumps({"request_id": request_id, "stream_error": type(error).__name__}), flush=True)
 
 
@@ -183,11 +224,12 @@ def main() -> None:
     parser.add_argument("--env-file", type=Path, required=True)
     parser.add_argument("--port", type=int, default=18762)
     args = parser.parse_args()
-    manifest = json.loads(args.manifest.read_text())
+    manifest = json.loads(args.manifest.read_text(encoding="utf-8-sig"))
     if not isinstance(manifest.get("routes"), dict) or not manifest.get("local_token"):
         raise SystemExit("Invalid router manifest")
     server = Router(("127.0.0.1", args.port), manifest=manifest, env_file=args.env_file)
-    print(json.dumps({"event": "listening", "host": "127.0.0.1", "port": args.port}), flush=True)
+    print(json.dumps({"event": "listening", "host": "127.0.0.1", "port": args.port,
+                      "instance_id": server.instance_id, "pid": os.getpid()}), flush=True)
     try:
         server.serve_forever()
     except KeyboardInterrupt:
