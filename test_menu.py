@@ -57,6 +57,28 @@ class ConfigTests(unittest.TestCase):
             for alias in ("mindlogic--gpt-6.1-sol", "mindlogic/gpt-6.1-sol"):
                 self.assertEqual(manifest["routes"][alias], {"provider": "mindlogic", "model": "gpt-6.1-sol"})
 
+    def test_gpt61_sol_uses_native_openai_metadata_when_account_cache_is_stale(self):
+        with tempfile.TemporaryDirectory() as temp:
+            home = Path(temp)
+            cached = {"slug": "gpt-6-sol", "priority": 1}
+            native = {"slug": "gpt-6.1-sol", "priority": 1, "context_window": 272000,
+                      "supported_reasoning_levels": [{"effort": "medium"}]}
+            (home / "models_cache.json").write_text(json.dumps({"models": [cached]}), encoding="utf-8")
+            with patch.object(menu_install, "HOME", home), \
+                    patch.object(menu_install, "read_mindlogic_key", return_value="test-key"), \
+                    patch.object(setup, "account_models", return_value={"gpt-6.1-sol"}), \
+                    patch.object(setup, "native_catalog", return_value={"models": [native]}):
+                catalog, manifest = menu_install.catalog_and_routes()
+            self.assertEqual(catalog["models"][0]["slug"], "gpt-6.1-sol")
+            self.assertEqual(catalog["models"][0]["context_window"], 272000)
+            self.assertEqual(catalog["models"][0]["priority"], 0)
+            self.assertEqual(catalog["models"][1], cached)
+            self.assertEqual(catalog["models"][2]["slug"], "mindlogic--gpt-6.1-sol")
+            self.assertEqual(manifest["routes"]["gpt-6.1-sol"],
+                             {"provider": "openai", "model": "gpt-6.1-sol"})
+            self.assertEqual(manifest["routes"]["mindlogic--gpt-6.1-sol"],
+                             {"provider": "mindlogic", "model": "gpt-6.1-sol"})
+
     def test_direct_catalog_uses_matching_cached_metadata(self):
         with tempfile.TemporaryDirectory() as temp:
             home = Path(temp)

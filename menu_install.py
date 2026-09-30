@@ -168,6 +168,14 @@ def catalog_and_routes() -> tuple[dict, dict]:
     templates = {model["slug"]: model for model in bundled}
     templates.update({model["slug"]: model for model in cached})
     openai = copy.deepcopy(cached)
+    # The custom picker catalog can outlive Codex's account cache after an app update.
+    # Expose the native 6.1 Sol entry while keeping every cached account model intact.
+    if "gpt-6.1-sol" not in {item["slug"] for item in openai}:
+        native_61 = next((item for item in bundled if item["slug"] == "gpt-6.1-sol"), None)
+        if native_61 is not None:
+            item = copy.deepcopy(native_61)
+            item["priority"] = 0
+            openai.insert(0, item)
     routes = {item["slug"]: {"provider": "openai", "model": item["slug"]} for item in openai}
     mindlogic = []
     unsupported = []
