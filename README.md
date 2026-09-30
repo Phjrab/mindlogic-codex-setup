@@ -28,7 +28,7 @@ Codex 데스크톱 앱의 **기존 모델 메뉴**에 `Mindlogic · ...` 항목�
 
 이 저장소는 macOS와 Windows를 지원합니다. 아래 명령은 `setup.py`가 있는 저장소 폴더에서 실행합니다. 기존 설치는 해당 환경의 `menu-refresh` 명령으로 모델 목록을 갱신합니다.
 
-**GPT-6.1 Sol 지원:** 계정에서 모델을 사용할 수 있고 Codex 내장 목록 또는 로그인한 계정의 모델 캐시에 일치하는 메타데이터가 있어야 합니다. 메뉴 이름은 `Mindlogic · GPT-6.1 Sol`, CLI 모델 ID는 `mindlogic--gpt-6.1-sol`입니다. 계정에 없거나 일치하는 메타데이터가 없는 모델은 메뉴에 추가하지 않습니다.
+**GPT-6.1 Sol 지원:** Mindlogic 계정에서 모델을 사용할 수 있고 Codex 내장 목록 또는 로그인한 계정의 모델 캐시에 일치하는 메타데이터가 있어야 합니다. 메뉴 이름은 `Mindlogic · GPT-6.1 Sol`, CLI 모델 ID는 `mindlogic--gpt-6.1-sol`입니다. Mindlogic 계정에 없거나 일치하는 메타데이터가 없는 모델은 해당 항목을 추가하지 않습니다. Codex 업데이트 후 OpenAI 계정 캐시가 이전 버전이라도 내장 목록에 `gpt-6.1-sol`이 있으면 `GPT-6.1-Sol` 항목도 추가합니다. OpenAI 계정에 접근 권한이 없는 경우 해당 OpenAI 요청은 거부될 수 있습니다.
 
 ## macOS
 
